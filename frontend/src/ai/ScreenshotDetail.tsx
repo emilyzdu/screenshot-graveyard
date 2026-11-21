@@ -23,8 +23,8 @@ import {
   markReviveActive,
   markReviveUnresolved,
   releaseRevive,
-  REVIVE_IN_FLIGHT_TEXT,
-  REVIVE_UNRESOLVED_TEXT,
+  REVIVE_SUCCEEDED_TEXT,
+  reviveWaitText,
 } from './reviveCoordinator';
 import { useConsent } from './useConsent';
 import { DEFAULT_MAX_POLLS, DEFAULT_POLL_INTERVAL_MS, type PollState } from './useOperationPolling';
@@ -251,10 +251,13 @@ export function ScreenshotDetail({
       setPoll({ phase: 'idle' });
       const lock = await acquireRevive(id);
       if (!lock.ok) {
-        setMessage({
-          kind: 'error',
-          text: lock.reason === 'in_flight' ? REVIVE_IN_FLIGHT_TEXT : REVIVE_UNRESOLVED_TEXT,
-        });
+        if (lock.reason === 'succeeded') {
+          // Already done on the server: never classify again; recover the saved result.
+          setMessage({ kind: 'info', text: REVIVE_SUCCEEDED_TEXT });
+          await loadAnalysis();
+          return;
+        }
+        setMessage({ kind: 'error', text: reviveWaitText(lock.reason) });
         return;
       }
       const res = await classifyScreenshot(id);

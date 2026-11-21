@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getConsent } from '../api/ai';
+import { getConsent, type ApiResult } from '../api/ai';
+import { boundedFetch } from '../api/boundedFetch';
 
 /**
  * checking: a read is in flight (or none has finished yet)
@@ -9,19 +10,91 @@ import { getConsent } from '../api/ai';
 export type ConsentLookup = 'checking' | 'granted' | 'not_granted' | 'lookup_failed';
 
 /**
+ * Screenshots whose consent withdrawal was requested but not confirmed by the
+ * server (request in flight, failed, or answer lost). Module-level so the block
+ * survives closing and reopening the drawer. While an id is here, a cached or
+ * freshly read `granted: true` is NOT treated as authorization for new AI work:
+ * the user asked to stop. It is cleared only by a server answer that consent is
+ * off, or by a new, explicit grant from the user.
+ */
+const unconfirmedWithdrawals = new Set<number>();
+
+export function markWithdrawalUnconfirmed(id: number): void {
+  unconfirmedWithdrawals.add(id);
+}
+export function clearWithdrawal(id: number): void {
+  unconfirmedWithdrawals.delete(id);
+}
+export function isWithdrawalUnconfirmed(id: number): boolean {
+  return unconfirmedWithdrawals.has(id);
+}
+/** Test helper: forget every recorded withdrawal. */
+export function resetConsentWithdrawals(): void {
+  unconfirmedWithdrawals.clear();
+}
+
+/**
  * Read-only consent lookups for a set of screenshots. Each screenshot has a
  * monotonically increasing request sequence, so a response that is not the
  * newest request is dropped and cannot overwrite newer state. Re-reads on
  * `refreshToken` change, window focus and tab visibility. Never grants consent.
  */
-export function useConsent(ids: number[], refreshToken: number = 0) {
+const TIMED_OUT: ApiResult<boolean> = { ok: false, status: 0, code: 'timeout', message: 'Request timed out' };
+const FAILED: ApiResult<boolean> = { ok: false, status: 0, code: 'network', message: 'Network request failed' };
+
+/**
+ * One consent read with a deadline around the WHOLE read, not only the network
+ * transport: it settles at `timeoutMs` (or when `outer` aborts) even if
+ * `getConsent` itself never settles. The transport it is given is aborted at
+ * the same moment, so the request and its body read are cancelled too. The
+ * timer and the outer-signal listener are always removed.
+ */
+function readWithin(id: number, timeoutMs: number, outer?: AbortSignal): Promise<ApiResult<boolean>> {
+  const controller = new AbortController();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: ApiResult<boolean>) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      outer?.removeEventListener('abort', onOuterAbort);
+      controller.abort(); // no-op once the read has finished; cancels it otherwise
+      resolve(result);
+    };
+    const onOuterAbort = () => finish(FAILED);
+    const timer = setTimeout(() => finish(TIMED_OUT), timeoutMs);
+    if (outer?.aborted) {
+      finish(FAILED);
+      return;
+    }
+    outer?.addEventListener('abort', onOuterAbort, { once: true });
+    getConsent(id, boundedFetch(timeoutMs, controller.signal)).then(finish, () => finish(FAILED));
+  });
+}
+
+export function useConsent(
+  ids: number[],
+  refreshToken: number = 0,
+  /**
+   * timeoutMs: bound every consent read (headers AND body) and cancel reads in
+   * flight when the component unmounts. A read that times out reports
+   * `lookup_failed`, never a consent value. Omitted: unbounded reads (classic UI).
+   */
+  opts: { timeoutMs?: number } = {},
+) {
   const [status, setStatus] = useState<Record<number, ConsentLookup>>({});
   const seqRef = useRef<Record<number, number>>({});
   const aliveRef = useRef(true);
+  const timeoutRef = useRef(opts.timeoutMs);
+  timeoutRef.current = opts.timeoutMs;
+  const abortRef = useRef<AbortController | null>(null);
   useEffect(() => {
     aliveRef.current = true;
+    const controller = new AbortController();
+    abortRef.current = controller;
     return () => {
       aliveRef.current = false;
+      controller.abort();
     };
   }, []);
 
@@ -42,7 +115,11 @@ export function useConsent(ids: number[], refreshToken: number = 0) {
     }
     const entries = await Promise.all(
       target.map(async (id) => {
-        const res = await getConsent(id);
+        const timeoutMs = timeoutRef.current;
+        const res =
+          timeoutMs === undefined
+            ? await getConsent(id)
+            : await readWithin(id, timeoutMs, abortRef.current?.signal);
         const next: ConsentLookup = res.ok ? (res.data ? 'granted' : 'not_granted') : 'lookup_failed';
         if (aliveRef.current && seqRef.current[id] === mine[id]) {
           setStatus((cur) => ({ ...cur, [id]: next }));

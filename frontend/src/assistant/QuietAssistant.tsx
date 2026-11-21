@@ -9,8 +9,7 @@ import {
   markReviveUnresolved,
   reconcileRevive,
   releaseRevive,
-  REVIVE_IN_FLIGHT_TEXT,
-  REVIVE_UNRESOLVED_TEXT,
+  reviveWaitText,
 } from '../ai/reviveCoordinator';
 import { useConsent } from '../ai/useConsent';
 import { useProviderStatus } from '../ai/PrivacyNotice';
@@ -160,7 +159,21 @@ export function QuietAssistant({
 
   const classifyOne = async (id: number): Promise<'ok' | string> => {
     const lock = await acquireRevive(id);
-    if (!lock.ok) return lock.reason === 'in_flight' ? REVIVE_IN_FLIGHT_TEXT : REVIVE_UNRESOLVED_TEXT;
+    if (!lock.ok) {
+      if (lock.reason === 'succeeded') {
+        // Already revived on the server: nothing new is sent. Show it as the
+        // completed operation it is (loads the saved result), not as a failure.
+        if (lock.operationId !== null) {
+          return applyOutcome(id, lock.operationId, { kind: 'done', status: 'successful', errorDetail: null, artifactId: null });
+        }
+        const saved = await getAnalysis(id);
+        if (!aliveRef.current) return 'cancelled';
+        if (!saved.ok) return 'The analysis finished but could not be loaded.';
+        onAnalysisChanged(saved.data);
+        return 'ok';
+      }
+      return reviveWaitText(lock.reason);
+    }
     const accepted = await classifyScreenshot(id);
     if (!accepted.ok) {
       releaseRevive(id);

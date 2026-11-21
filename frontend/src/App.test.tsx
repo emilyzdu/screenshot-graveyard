@@ -542,7 +542,10 @@ describe('App mode selection', () => {
         try {
           const view = render(<App />);
           if (kind === 'archive') {
-            await openFor('real.png');
+            const opener = await screen.findByRole('button', { name: 'Open details for real.png' });
+            // The drawer's Revive panel reads consent and analysis on open; settle those inside act.
+            await act(async () => { fireEvent.click(opener); });
+            expect(screen.getByText(/Consent: not granted/)).toBeInTheDocument();
             fireEvent.click(burial());
           } else {
             fireEvent.click(await screen.findByRole('button', { name: /The Crypt/ }));

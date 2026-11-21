@@ -45,3 +45,26 @@ What the Gothic Workspace does with that:
 - Recovery: check again, or reload the page, which starts from the server's current state. Both actions are idempotent on the server today, so a late commit cannot corrupt data, but the UI does not rely on that.
 
 Definitive resolution needs backend support: an idempotency key or operation id returned by (or sent with) the lifecycle POST plus a status read, or a state precondition on the transition. That is a separate backend task.
+
+## Batch 3A: consent + Revive + classification (Gothic Live Workspace)
+
+Component: `frontend/src/shell/RevivePanel.tsx`, rendered in the Gothic screenshot drawer. It reuses the existing clients in `api/ai.ts`, `ai/useConsent.ts`, `ai/pollOperation.ts`, `ai/reviveCoordinator.ts` and the copy in `ai/messages.ts`. No backend changes and no new endpoints.
+
+| UI action | API method | Backend route | Response | Resulting UI state |
+|---|---|---|---|---|
+| Open drawer | `getProviderMode` (once per page) | `GET /api/ai/provider-mode` | `{mode: "fake"\|"openai"}` | Fake AI copy and badge; Revive offered only in `fake` mode |
+| Open drawer | `getConsent` | `GET /api/screenshots/{id}/consent` | `{screenshotId, granted}` | "granted" / "not granted" / "could not be read" |
+| Open drawer | `getAnalysis` | `GET /api/screenshots/{id}/analysis` | 200 analysis, or 404 | Result shown, or Revive offered |
+| Allow AI processing | `setConsent(id, true)` | `POST /api/screenshots/{id}/consent` (CSRF) | `{granted: true}` | Revive enabled (fake mode, active screenshot, no analysis yet) |
+| Decline / Withdraw | `setConsent(id, false)` | same | `{granted: false}` | Revive disabled; no classify request |
+| Revive | `classifyScreenshot` | `POST /api/screenshots/{id}/classify` (CSRF) | 202 `{operationId, kind, status}` | "Revive is running on the server…" |
+| (polling) | `getOperation` | `GET /api/operations/{opId}` | `pending\|successful\|failed\|uncertain` | Terminal message from `describeOperationOutcome` |
+| (on `successful`) | `getAnalysis`, `listScreenshots` | as above | analysis; list with `analysis` summary | Result card labelled "Simulated result"; card status "Revived" |
+
+Outcome rules:
+- `classify` 4xx (403 `consent_required`, 404, 429) and 503 `service_unavailable`/`identity_unavailable` are returned before any operation is created, so they are treated as "not started" and Revive can be retried.
+- Any other classify failure (network error, 15 s timeout, other 5xx, malformed 2xx body) is an **unknown** outcome. The screenshot is blocked from a second Revive (`markReviveOutcomeUnknown`). "Check status" resolves it only when `GET /analysis` shows a persisted result. There is no endpoint to look up an operation by screenshot, so an accepted-but-still-running operation whose id was lost cannot be found. The copy says reloading allows a retry that may start a second analysis.
+- Poll timeouts or outages keep the operation id (unresolved). "Check status" and reopening the drawer resume polling the same id; nothing is resubmitted.
+- Closing the drawer stops polling (the pending wait and in-flight read are aborted) and keeps the id. A classify POST in flight is not aborted (that would not cancel the server's work); its id is recorded for the next open.
+
+Consent-dispatch race (task 7.1): still present. `classification_service.py` re-checks consent after reading the bytes and then calls the adapter with no lock or consent version, so a withdrawal committed between that check and the adapter call does not stop the call. Revive is therefore disabled in the UI whenever the server reports a real provider, and the UI copy says withdrawing cannot stop an analysis already started. This is a frontend guard only; the server would still accept classify in `openai` mode.

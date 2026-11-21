@@ -17,6 +17,8 @@ import {
   type Screenshot,
 } from '../api/client';
 import { CRYPT_GALLERY_NOTE } from '../ai/messages';
+import { useProviderStatus } from '../ai/PrivacyNotice';
+import { RevivePanel } from './RevivePanel';
 import { Button } from '../ui/primitives';
 import { ShotArt } from '../ui/ShotArt';
 import { Drawer } from './DetailDrawer';
@@ -165,6 +167,8 @@ export default function LiveWorkspace() {
   const [uncertain, setUncertain] = useState<Record<number, Uncertain>>({});
   const [drawerMsg, setDrawerMsg] = useState<{ session: number; text: string } | null>(null);
   const uploadInFlight = useRef(false);
+  // Read-only provider check (GET /api/ai/provider-mode). Revive is offered only in fake mode.
+  const provider = useProviderStatus();
   const lifecycleInFlight = useRef(false);
   const uncertainRef = useRef<Record<number, Uncertain>>({});
   const detailRef = useRef<Detail | null>(null);
@@ -511,7 +515,7 @@ export default function LiveWorkspace() {
         </div>
         <aside className="sg-side ui-card sg-live-links" aria-label="Other workflows">
           <h2 className="sg-display">More workflows</h2>
-          <p>Use the classic workspace for Revive and Study Notes.</p>
+          <p>Use the classic workspace for Study Notes and editing results.</p>
           <a className="sg-link" href="?view=classic">Open classic workspace</a>
           <a className="sg-link" href="?demo=1">Explore the visual demo</a>
         </aside>
@@ -548,6 +552,14 @@ export default function LiveWorkspace() {
             <dt>Size</dt><dd>{detailShot.sizeLabel}</dd>
             <dt>Status</dt><dd>{detailShot.statusLabel}</dd>
           </dl>
+          {detailRecord && (
+            <RevivePanel
+              screenshot={detailRecord}
+              providerMode={provider.mode}
+              providerLoading={provider.loading}
+              onAnalysisChanged={() => void refreshGallery()}
+            />
+          )}
           {pending && pendingId === Number(detailShot.id) && (
             <p role="status">{pending.kind === 'archive' ? 'Burying…' : 'Resurrecting…'} You can close this panel; the request keeps going.</p>
           )}

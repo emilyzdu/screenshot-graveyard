@@ -13,7 +13,8 @@ const m = vi.hoisted(() => ({
 }));
 vi.mock('../api/ai', async (orig) => ({ ...(await orig<typeof import('../api/ai')>()), ...m }));
 
-import { getReviveEntry } from './reviveCoordinator';
+import { getReviveEntry, getReviveSuccess } from './reviveCoordinator';
+import { RevivePanel } from '../shell/RevivePanel';
 import { QuietAssistant } from '../assistant/QuietAssistant';
 import { ScreenshotDetail } from './ScreenshotDetail';
 
@@ -256,11 +257,78 @@ describe('Screenshot Detail lifecycle and reporting', () => {
     expect(getReviveEntry(1)).toMatchObject({ phase: 'unresolved', operationId: 7 });
     expect(m.getOperation).not.toHaveBeenCalled();
     // Reopening reconciles the kept operation instead of being stuck "in flight".
+    // It finished successfully, so no second classification may be sent.
     m.getOperation.mockImplementation(() => opResult(7, 'successful'));
     m.classifyScreenshot.mockImplementation(() => accepted(8));
     render(<ScreenshotDetail screenshot={shot(1)} onClose={() => {}} pollIntervalMs={1} maxPolls={5} />);
+    m.getAnalysis.mockImplementation(() => ok(analysisFor('Study/Knowledge', 'Saved notes')));
     fireEvent.click(await detailRevive());
-    await waitFor(() => expect(m.classifyScreenshot).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(m.getOperation).toHaveBeenCalledWith(7));
+    expect(await screen.findByText(/Revive already finished for this screenshot/)).toBeInTheDocument();
+    expect(m.classifyScreenshot).toHaveBeenCalledTimes(1);
+    expect(getReviveSuccess(1)).toEqual({ operationId: 7 });
+    // The confirmed operation's saved result is recovered (GET /analysis), not re-created.
+    expect(await screen.findByDisplayValue('Saved notes')).toBeInTheDocument();
+    expect(screen.queryByText(/could not|failed/i)).not.toBeInTheDocument();
+    // Asking again is still refused without a POST.
+    const again = screen.queryByRole('button', { name: /revive: analyze with ai/i });
+    if (again && !(again as HTMLButtonElement).disabled) fireEvent.click(again);
+    await act(async () => { await Promise.resolve(); });
+    expect(m.classifyScreenshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('Gothic panel closes before the operation id arrives; op succeeds; Classic Detail Revive sends no second POST', async () => {
+    let resolveClassify: (v: unknown) => void = () => {};
+    m.classifyScreenshot.mockImplementation(() => new Promise((r) => { resolveClassify = r; }));
+    const gothic = render(
+      <RevivePanel screenshot={shot(1)} providerMode="fake" providerLoading={false} onAnalysisChanged={() => {}} pollIntervalMs={1} maxPolls={5} />,
+    );
+    const start = await screen.findByRole('button', { name: 'Revive with Fake AI' });
+    await waitFor(() => expect(start).toBeEnabled());
+    fireEvent.click(start);
+    await waitFor(() => expect(m.classifyScreenshot).toHaveBeenCalledTimes(1));
+    gothic.unmount(); // closed before the operation id is known
+    await act(async () => { resolveClassify({ ok: true, data: { operationId: 7, kind: 'classify', status: 'pending', errorDetail: null, warning: null } }); });
+    expect(getReviveEntry(1)).toMatchObject({ phase: 'unresolved', operationId: 7 });
+    // The server finished operation 7 successfully in the meantime, but the
+    // result read made when Classic Detail opens does not return it (404).
+    m.getOperation.mockImplementation(() => opResult(7, 'successful'));
+    m.classifyScreenshot.mockImplementation(() => accepted(8));
+    render(<ScreenshotDetail screenshot={shot(1)} onClose={() => {}} pollIntervalMs={1} maxPolls={5} />);
+    const detailButton = await detailRevive();
+    m.getAnalysis.mockImplementation(() => ok(analysisFor('Study/Knowledge', 'From operation 7')));
+    fireEvent.click(detailButton);
+    await waitFor(() => expect(m.getOperation).toHaveBeenCalledWith(7));
+    expect(await screen.findByText(/Revive already finished for this screenshot/)).toBeInTheDocument();
+    expect(m.classifyScreenshot).toHaveBeenCalledTimes(1);
+    expect(getReviveSuccess(1)).toEqual({ operationId: 7 });
+    expect(await screen.findByDisplayValue('From operation 7')).toBeInTheDocument();
+  });
+
+  it('Quiet Assistant after a kept operation turns out successful: no POST, counted as revived, not a failure', async () => {
+    let resolveClassify: (v: unknown) => void = () => {};
+    m.classifyScreenshot.mockImplementation(() => new Promise((r) => { resolveClassify = r; }));
+    const detail = render(<ScreenshotDetail screenshot={shot(1)} onClose={() => {}} pollIntervalMs={1} maxPolls={5} />);
+    fireEvent.click(await detailRevive());
+    await waitFor(() => expect(m.classifyScreenshot).toHaveBeenCalledTimes(1));
+    detail.unmount();
+    await act(async () => { resolveClassify({ ok: true, data: { operationId: 7, kind: 'classify', status: 'pending', errorDetail: null, warning: null } }); });
+    m.getOperation.mockImplementation(() => opResult(7, 'successful'));
+    m.getAnalysis.mockImplementation(() => ok(analysisFor('Study/Knowledge', 'x')));
+    m.classifyScreenshot.mockImplementation(() => accepted(8));
+    const onAnalysisChanged = vi.fn();
+    render(
+      <QuietAssistant
+        selected={[shot(1)]} refreshToken={0} onOpen={vi.fn()} onSetUpStudyNote={vi.fn()}
+        onAnalysisChanged={onAnalysisChanged} pollIntervalMs={1} maxPolls={5}
+      />,
+    );
+    fireEvent.click(await assistantRevive());
+    expect(await screen.findByText(/1 screenshot revived/)).toBeInTheDocument();
+    expect(screen.queryByText(/0 revived/)).not.toBeInTheDocument();
+    expect(m.classifyScreenshot).toHaveBeenCalledTimes(1);
+    expect(onAnalysisChanged).toHaveBeenCalled();
+    expect(getReviveSuccess(1)).toEqual({ operationId: 7 });
   });
 
   it('Detail poll failures report status unavailable with the retained operation id', async () => {
