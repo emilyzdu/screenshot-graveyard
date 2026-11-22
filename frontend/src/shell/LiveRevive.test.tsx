@@ -194,8 +194,10 @@ describe('Gothic Revive: operation states', () => {
     const result = await screen.findByLabelText('Classification result');
     expect(within(result).getByText('Study/Knowledge')).toBeInTheDocument();
     expect(within(result).getByText('Simulated result')).toBeInTheDocument();
-    expect(within(result).getByText('82%')).toBeInTheDocument();
-    expect(within(result).getByText(/demo AI \(placeholder text, not real image understanding\)/)).toBeInTheDocument();
+    // Fake AI confidence is a fixed placeholder: never shown as a percentage.
+    expect(within(result).queryByText(/82%/)).not.toBeInTheDocument();
+    expect(within(result).getByText(/Not meaningful: the Fake AI returns a fixed placeholder value/)).toBeInTheDocument();
+    expect(within(result).getAllByText(/demo AI \(placeholder text, not real image understanding\)/)).not.toHaveLength(0);
     expect(ai.getOperation).toHaveBeenCalledTimes(2);
     expect(ai.classifyScreenshot).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(screen.getByRole('article', { name: 'syn.png' })).toHaveTextContent('Revived'));

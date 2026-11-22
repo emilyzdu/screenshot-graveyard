@@ -28,6 +28,15 @@ export interface ShotVM {
   suggestedAction?: ActionId;
   /** True for screenshots added from the drop zone in this browser session. */
   local?: boolean;
+  /**
+   * Live mode only: the saved analysis summary from GET /api/screenshots.
+   * `provenance` is a short, honest label (e.g. "Simulated (Fake AI)").
+   */
+  analysisSummary?: { category: string; epitaph: string; uncertain: boolean; provenance: string };
+  /** Live mode only: a rule-based suggestion label (never model-authored). */
+  ruleSuggestionLabel?: string;
+  /** Live mode only: the action the user chose for this screenshot. */
+  chosenLabel?: string;
 }
 
 export interface ArtifactVM {

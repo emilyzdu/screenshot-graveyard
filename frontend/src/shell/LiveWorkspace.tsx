@@ -4,7 +4,7 @@ import '@fontsource/cormorant-garamond/700.css';
 import '../ui/theme.css';
 import '../ui/components.css';
 import './shell.css';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   archiveScreenshot,
   getWorkspace,
@@ -19,6 +19,11 @@ import {
 import { CRYPT_GALLERY_NOTE } from '../ai/messages';
 import { useProviderStatus } from '../ai/PrivacyNotice';
 import { RevivePanel } from './RevivePanel';
+import { LiveAssistant } from './LiveAssistant';
+import { LIVE_ACTIONS, epitaphProvenanceLabel, type ActionChoice } from './nextAction';
+import { useValidatedAnalysis } from './useValidatedAnalysis';
+import { createAnalysisAuthority, currentSuggestionRule } from './sharedAnalysis';
+import type { ProviderMode } from '../api/ai';
 import { Button } from '../ui/primitives';
 import { ShotArt } from '../ui/ShotArt';
 import { Drawer } from './DetailDrawer';
@@ -139,7 +144,13 @@ function galleryState(result: ListResult): GalleryState {
     : { phase: 'error', message: `Could not load screenshots. ${result.error}` };
 }
 
-function toShot(screenshot: Screenshot): ShotVM {
+function toShot(
+  screenshot: Screenshot,
+  mode: ProviderMode | 'unknown' = 'unknown',
+  choice?: ActionChoice,
+  summary = screenshot.analysis,
+  suggestionLabel?: string,
+): ShotVM {
   const uploaded = Date.parse(screenshot.uploadedAt);
   const bytes = screenshot.byteSize;
   const state = screenshot.state === 'archived' ? 'Archived' : screenshot.analysis ? 'Revived' : 'Ghost';
@@ -153,6 +164,18 @@ function toShot(screenshot: Screenshot): ShotVM {
     topic: 'other',
     imageSrc: imageUrl(screenshot.screenshotId),
     statusLabel: screenshot.isDuplicate ? `${state} · Duplicate` : state,
+    ...(summary && screenshot.state === 'active'
+      ? {
+          analysisSummary: {
+            category: summary.category,
+            epitaph: summary.epitaph,
+            uncertain: summary.uncertain,
+            provenance: epitaphProvenanceLabel(summary.epitaphOrigin, mode),
+          },
+          ruleSuggestionLabel: suggestionLabel,
+          chosenLabel: choice ? LIVE_ACTIONS[choice.action].label : undefined,
+        }
+      : {}),
   };
 }
 
@@ -169,6 +192,17 @@ export default function LiveWorkspace() {
   const uploadInFlight = useRef(false);
   // Read-only provider check (GET /api/ai/provider-mode). Revive is offered only in fake mode.
   const provider = useProviderStatus();
+  // Batch 3B: selection (Workspace view), the user's chosen next action per
+  // screenshot (transient: this page only, never sent), and the assistant panel.
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [choices, setChoices] = useState<Record<number, ActionChoice>>({});
+  // One shared, screenshot-scoped authority for validated analyses: the
+  // assistant's read and the Revive drawer's read both publish to it, newest
+  // request wins. Lives as long as this workspace view (drawer close keeps it).
+  const [analysisAuthority] = useState(createAnalysisAuthority);
+  const [assistantCollapsed, setAssistantCollapsed] = useState(
+    () => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 899px)').matches,
+  );
   const lifecycleInFlight = useRef(false);
   const uncertainRef = useRef<Record<number, Uncertain>>({});
   const detailRef = useRef<Detail | null>(null);
@@ -402,12 +436,80 @@ export default function LiveWorkspace() {
     }
   };
 
+  // The shared Revive registry lives outside React. A drawer's unmount cleanup
+  // updates it (e.g. "running" → "unresolved, id kept") during the same commit
+  // in which this component rendered, so re-render once after the drawer
+  // closes: parent effects run after child cleanup, so the assistant then reads
+  // the registry's current state instead of a stale one.
+  const [, setRegistryRead] = useState(0);
+  useEffect(() => {
+    if (detail === null) setRegistryRead((n) => n + 1);
+  }, [detail]);
+
+  // Drop selections whose screenshot is gone or no longer active (buried), so a
+  // later Resurrection does not bring back a stale selection.
+  useEffect(() => {
+    if (gallery.phase !== 'ready') return;
+    const active = new Set(gallery.screenshots.filter((s) => s.state === 'active').map((s) => s.screenshotId));
+    setSelectedIds((cur) => (cur.every((sid) => active.has(sid)) ? cur : cur.filter((sid) => active.has(sid))));
+  }, [gallery]);
+
   const archived = view === 'crypt';
   const screenshots = gallery.phase === 'ready' ? gallery.screenshots : [];
   const detailRecord = detail ? screenshots.find((item) => String(item.screenshotId) === detail.id) : undefined;
   const detailShot = detailRecord ? toShot(detailRecord) : null;
   const detailArchived = detailRecord?.state === 'archived';
-  const shots = screenshots.filter((shot) => (shot.state === 'archived') === archived).map(toShot);
+  // Crypt and multi-select have no current screenshot to validate for a suggestion.
+  const selectedRecords = archived ? [] : selectedIds
+    .map((sid) => screenshots.find((s) => s.screenshotId === sid))
+    .filter((s): s is Screenshot => s !== undefined && s.state === 'active');
+  const selected = selectedRecords.length === 1 ? selectedRecords[0] : undefined;
+  const { validation, conflicts, retry, cardSummary } = useValidatedAnalysis(selected, analysisAuthority);
+  // The same eligibility check as at click time (see chooseAction), from the
+  // shared authority's LATEST read: pending, failed and invalid reads suggest nothing.
+  const rule = currentSuggestionRule(analysisAuthority, selected);
+  const suggestion = rule.kind === 'suggest' ? rule.action : undefined;
+
+  // Check the committed selection and rule at the write boundary, even if a
+  // handler belonging to an earlier suggestion is invoked after invalidation.
+  // The COMMITTED selection: which screenshot the UI is about, and its record
+  // from the committed gallery. Written only in a layout effect (never during a
+  // render that might not commit), so a handler captured by an older render
+  // still sees the latest committed gallery here, not its own closure's.
+  // Suggestion eligibility itself is NOT cached here; it is checked live, below.
+  const choiceAuthority = useRef<{ id: number; record: Screenshot }>();
+  useLayoutEffect(() => {
+    choiceAuthority.current = selected ? { id: selected.screenshotId, record: selected } : undefined;
+    return () => { choiceAuthority.current = undefined; };
+  }, [selected]);
+
+  const chooseAction = (id: number, choice: ActionChoice | null) => {
+    const authority = choiceAuthority.current;
+    if (authority?.id !== id) return;
+    if (choice?.basis === 'accepted_suggestion') {
+      // The SAME eligibility rule as rendering, against the live shared
+      // authority (not React state): a newer read may have started, failed or
+      // answered after this button was rendered. This is the only check.
+      // The committed record, not `screenshots` from this handler's closure:
+      // an older render's gallery snapshot must not decide eligibility.
+      const live = currentSuggestionRule(analysisAuthority, authority.record);
+      const latest = analysisAuthority.get(id);
+      if (live.kind !== 'suggest' || live.action !== choice.action) return;
+      if (latest?.analysis?.classification.category !== choice.category) return;
+    }
+    setChoices((previous) => {
+      if (choice) return { ...previous, [id]: choice };
+      const next = { ...previous };
+      delete next[id];
+      return next;
+    });
+  };
+  const shots = screenshots
+    .filter((shot) => (shot.state === 'archived') === archived)
+    .map((shot) => toShot(
+      shot, provider.mode, choices[shot.screenshotId], cardSummary(shot),
+      selected?.screenshotId === shot.screenshotId && suggestion ? LIVE_ACTIONS[suggestion].label : undefined,
+    ));
   const titleOf = (id: number) => {
     const record = screenshots.find((s) => s.screenshotId === id);
     return record ? toShot(record).title : `Screenshot #${id}`;
@@ -433,7 +535,7 @@ export default function LiveWorkspace() {
     <div className="sg" data-testid="live-workspace">
       <a className="sg-skip" href="#sg-main">Skip to content</a>
       <AppHeader modeLabel="Private workspace" demo={false} />
-      <div className="sg-layout" data-assistant="collapsed">
+      <div className="sg-layout" data-assistant={assistantCollapsed ? 'collapsed' : 'open'}>
         <div className="sg-col">
           <NavTabs
             active={view}
@@ -482,6 +584,15 @@ export default function LiveWorkspace() {
             {gallery.phase === 'ready' && (
               <ScreenshotGallery
                 shots={shots}
+                selectedIds={archived ? [] : selectedRecords.map((s) => String(s.screenshotId))}
+                onToggle={
+                  archived
+                    ? undefined
+                    : (sid) =>
+                        setSelectedIds((cur) =>
+                          cur.includes(Number(sid)) ? cur.filter((x) => x !== Number(sid)) : [...cur, Number(sid)],
+                        )
+                }
                 onOpen={(id, opener) => {
                   setDrawerMsg(null);
                   setDetail({ id, opener, session: ++sessionCounter.current });
@@ -513,12 +624,28 @@ export default function LiveWorkspace() {
             )}
           </main>
         </div>
-        <aside className="sg-side ui-card sg-live-links" aria-label="Other workflows">
-          <h2 className="sg-display">More workflows</h2>
-          <p>Use the classic workspace for Study Notes and editing results.</p>
-          <a className="sg-link" href="?view=classic">Open classic workspace</a>
-          <a className="sg-link" href="?demo=1">Explore the visual demo</a>
-        </aside>
+        <div className="sg-side">
+          <LiveAssistant
+            selected={selectedRecords}
+            providerMode={provider.mode}
+            choices={choices}
+            validation={validation}
+            conflicts={conflicts}
+            rule={rule}
+            onRetry={() => {
+              if (conflicts) void refreshGallery(STATUS_CHECK_TIMEOUT_MS);
+              retry();
+            }}
+            onChoose={chooseAction}
+            onOpen={(sid, opener) => {
+              setDrawerMsg(null);
+              setDetail({ id: String(sid), opener, session: ++sessionCounter.current });
+            }}
+            onClearSelection={() => setSelectedIds([])}
+            collapsed={assistantCollapsed}
+            onToggleCollapsed={() => setAssistantCollapsed((c) => !c)}
+          />
+        </div>
       </div>
       {detail && detailShot && (
         <Drawer
@@ -558,6 +685,7 @@ export default function LiveWorkspace() {
               providerMode={provider.mode}
               providerLoading={provider.loading}
               onAnalysisChanged={() => void refreshGallery()}
+              analysisAuthority={analysisAuthority}
             />
           )}
           {pending && pendingId === Number(detailShot.id) && (

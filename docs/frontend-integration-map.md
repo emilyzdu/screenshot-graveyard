@@ -68,3 +68,47 @@ Outcome rules:
 - Closing the drawer stops polling (the pending wait and in-flight read are aborted) and keeps the id. A classify POST in flight is not aborted (that would not cancel the server's work); its id is recorded for the next open.
 
 Consent-dispatch race (task 7.1): still present. `classification_service.py` re-checks consent after reading the bytes and then calls the adapter with no lock or consent version, so a withdrawal committed between that check and the adapter call does not stop the call. Revive is therefore disabled in the UI whenever the server reports a real provider, and the UI copy says withdrawing cannot stop an analysis already started. This is a frontend guard only; the server would still accept classify in `openai` mode.
+
+## Batch 3B: saved analysis on cards, Live Quiet Assistant, choose a next step
+
+Components: `shell/LiveAssistant.tsx`, `shell/nextAction.ts` (rule + vocabulary), card fields in `shell/Workspace.tsx`, wiring in `shell/LiveWorkspace.tsx`. No backend changes and no new endpoints.
+
+The backend has **no intent, suggestion, action-plan or draft contract**. Everything below is either a backend field shown as-is, or an explicit frontend rule labelled "rule-based".
+
+| Backend field (source) | Frontend representation | Recommended user action |
+|---|---|---|
+| `analysis.category` (list summary and `GET /analysis` `classification.category`) | Card and assistant show the category verbatim | Only matching, validated detail authorizes the rule below |
+| `analysis.uncertain` / `classification.uncertain` | "uncertain" on the card, "Marked uncertain" badge | Never suggests anything |
+| `analysis.epitaph` / `epitaph.text` | Short Epitaph on the card (2-line clamp), full in the assistant | Display only |
+| `epitaph.visibleFacts` | "Visible facts" in the assistant | Display only |
+| `epitaph.inferredIntent` (nullable) | "Possible reason … (a guess, not a fact)" only when non-null | Display only; never used for suggestions |
+| `classification.origin`, `epitaph.origin`, `analysis.epitaphOrigin` | Recognized origins are shown per field. Facts and inferred intent inherit an AI-version origin when written with that Epitaph. After a manual Epitaph edit their source is unavailable. | Display only |
+| `classification.confidence` | Not shown on cards or in the assistant. Only shown in the 3A result panel for an explicitly AI-origin category with a confirmed OpenAI provider | Never used |
+| `GET /api/ai/provider-mode` | Fake AI labels | Display only |
+
+Category rule (`suggestFromCategory`, category only, never Epitaph text):
+
+| Category | Suggested (rule-based) |
+|---|---|
+| Study/Knowledge | Make Notes |
+| Shopping/Inspiration | Add to Wishlist |
+| Memory/Entertainment | Save as Memory |
+| Reference/Document | none ("does not point to one next step") |
+| Unknown/Needs Review | none |
+| Potentially Sensitive | none (with a caution) |
+| any, when uncertain | none |
+
+Cards and Assistant share the same eligibility for the single selected screenshot. While the detail is loading, unavailable, mismatched, or disagrees with the list, neither offers an automatic suggestion. The card keeps the fresher detail for display when the list is stale. Explicit choices remain separate.
+
+Add to Calendar is never suggested (no category identifies an event); it can only be chosen.
+
+Choice lifecycle (transient by design): the user accepts the suggestion ("Chosen by you … you accepted the suggestion") or picks "Something else" ("Chosen by you"). The choice lives in `LiveWorkspace` state keyed by screenshot id, is never sent to the server, survives drawer close/reopen, selection changes and Safe Burial/Resurrection, and is lost on reload. It ends at **Ready to prepare**; "Prepare draft" is disabled.
+
+Requests: displaying cards sends nothing beyond the list and authorized image reads; selecting one analyzed screenshot sends one bounded `GET /api/screenshots/{id}/analysis` (aborted on change/unmount); choosing, overriding and clearing send nothing.
+
+### Batch 4 handoff requirements
+- **Prepare contract:** a backend endpoint that accepts `{screenshotId, action}` and creates a draft as an operation (202 + operationId, polled like classify), consent-gated and idempotent per (screenshot, action). Make Notes can likely reuse `POST /api/study-notes` (single-screenshot selection); Add to Calendar, Save as Memory and Add to Wishlist have no backend at all.
+- **Persist the choice** server-side if it must survive reload, or keep it transient and say so (current behaviour).
+- **Replace the disabled "Prepare draft"** with a real call, keep the "Chosen by you" vs "Suggested" distinction, and add Review → Approve → Deliver states with no external writes until explicit approval.
+- **Multi-select** stays constrained to one screenshot until a batch contract exists.
+- The consent-dispatch race (task 7.1) must be fixed before any real-provider Prepare.

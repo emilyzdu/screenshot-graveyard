@@ -1,3 +1,4 @@
+import { isAIAnalysisOrigin } from '../api/analysisOrigin';
 import type { ApiFailure, OperationStatus, ProviderMode } from '../api/ai';
 
 /** Plain-language text for a failed AI request (never shows raw server detail). */
@@ -59,12 +60,21 @@ export function describeOperationOutcome(
  * "AI" output is a deterministic placeholder that never looked at the image, so it
  * must not be presented as genuine understanding (Task 4.1).
  */
-export function describeOrigin(origin: string, provider: ProviderMode | 'unknown'): string {
+export function describeOrigin(origin: unknown, provider: ProviderMode | 'unknown'): string {
   if (origin === 'manual_edit') return 'edited by you';
+  if (!isAIAnalysisOrigin(origin)) return 'source unconfirmed';
   const verb = origin === 'ai_redo' ? 'regenerated' : 'generated';
   if (provider === 'fake') return `${verb} by the demo AI (placeholder text, not real image understanding)`;
   if (provider === 'openai') return `${verb} by AI (a suggestion; it can be wrong)`;
   return `${verb} by AI`;
+}
+
+/**
+ * AI versions write these fields together. A text edit retains the old auxiliary
+ * values without recording their original provenance on the new version.
+ */
+export function describeEpitaphAuxiliaryOrigin(origin: unknown, provider: ProviderMode | 'unknown'): string {
+  return isAIAnalysisOrigin(origin) ? describeOrigin(origin, provider) : 'field source unavailable';
 }
 
 /** Poll requests failed, so the real state of the operation is not known. */

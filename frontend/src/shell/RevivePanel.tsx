@@ -8,9 +8,10 @@ import {
   type OperationStatus,
   type ProviderMode,
 } from '../api/ai';
+import { isAIAnalysisOrigin } from '../api/analysisOrigin';
 import { boundedFetch } from '../api/boundedFetch';
 import type { Screenshot } from '../api/client';
-import { describeOperationOutcome, describeOrigin, describeRequestFailure } from '../ai/messages';
+import { describeEpitaphAuxiliaryOrigin, describeOperationOutcome, describeOrigin, describeRequestFailure } from '../ai/messages';
 import { pollOperation } from '../ai/pollOperation';
 import {
   acquireRevive,
@@ -26,6 +27,7 @@ import {
 } from '../ai/reviveCoordinator';
 import { clearWithdrawal, isWithdrawalUnconfirmed, markWithdrawalUnconfirmed, useConsent } from '../ai/useConsent';
 import { DEFAULT_MAX_POLLS, DEFAULT_POLL_INTERVAL_MS } from '../ai/useOperationPolling';
+import { summaryKey, type AnalysisAuthority } from './sharedAnalysis';
 import { Badge, Button } from '../ui/primitives';
 
 /** Upper bound for the classify POST before its outcome is treated as unknown. */
@@ -81,6 +83,12 @@ interface Props {
   providerLoading: boolean;
   /** Called after the server reports a new persisted analysis, so the gallery can re-sync. */
   onAnalysisChanged: () => void;
+  /**
+   * The workspace's shared analysis authority. Every validated GET /analysis
+   * this panel makes is published to it (ticket taken before the request), so
+   * the cards and the assistant never keep a suggestion from an older read.
+   */
+  analysisAuthority?: Pick<AnalysisAuthority, 'begin' | 'resolve'>;
   pollIntervalMs?: number;
   maxPolls?: number;
 }
@@ -96,6 +104,7 @@ export function RevivePanel({
   providerMode,
   providerLoading,
   onAnalysisChanged,
+  analysisAuthority,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   maxPolls = DEFAULT_MAX_POLLS,
 }: Props) {
@@ -145,14 +154,29 @@ export function RevivePanel({
   });
 
   const read = useCallback(() => boundedFetch(READ_TIMEOUT_MS, abortRef.current.signal), []);
+  // Latest props for the publish path, without making the read callbacks (and
+  // the mount effect that depends on them) change on every gallery refresh.
+  const publishRef = useRef({ authority: analysisAuthority, listKey: '' });
+  publishRef.current = {
+    authority: analysisAuthority,
+    listKey: screenshot.analysis ? summaryKey(screenshot.analysis) : '',
+  };
 
   /** Read the persisted analysis. Returns what the server said, applied only while mounted. */
   const loadAnalysis = useCallback(async (): Promise<AnalysisState> => {
     const signal = abortRef.current.signal;
+    const { authority, listKey } = publishRef.current;
+    // Starting this read makes it the latest for the screenshot at once: an
+    // earlier success stops authorizing suggestions while it is pending.
+    const ticket = authority?.begin(id, listKey);
     const res = await getAnalysis(id, read());
-    const next: AnalysisState = res.ok
+    // Every outcome is settled (success, failure, abort, wrong id), even if this
+    // panel has since closed; the authority ignores it unless still the latest.
+    if (authority && ticket !== undefined) authority.resolve(id, ticket, res);
+    const valid = res.ok && res.data.screenshotId === id; // never show another screenshot's analysis
+    const next: AnalysisState = valid
       ? { phase: 'ready', analysis: res.data }
-      : res.status === 404
+      : !res.ok && res.status === 404
         ? { phase: 'none' }
         : { phase: 'error' };
     if (!signal.aborted) setAnalysis(next);
@@ -583,25 +607,47 @@ export function RevivePanel({
           <div className="sg-result__head">
             <span className="sg-result__category">{ready.classification.category}</span>
             {ready.classification.uncertain && <Badge tone="muted">Uncertain</Badge>}
-            {fake && <Badge tone="peach">Simulated result</Badge>}
+            {fake && isAIAnalysisOrigin(ready.classification.origin) && isAIAnalysisOrigin(ready.epitaph.origin) &&
+              <Badge tone="peach">Simulated result</Badge>}
           </div>
           <dl className="sg-facts">
             <dt>Confidence</dt>
-            <dd>{Math.round(ready.classification.confidence * 100)}%</dd>
+            <dd>
+              {/* A number is shown ONLY when it is a real model-reported value: a
+                  confirmed real provider and an AI-chosen category. A manual
+                  category edit keeps the old number, which is not the model's
+                  confidence in the user's category. */}
+              {ready.classification.origin === 'manual_edit'
+                ? 'Not shown: this category was edited by you, so there is no model confidence for it.'
+                : !isAIAnalysisOrigin(ready.classification.origin)
+                  ? 'Not shown: the category source could not be confirmed.'
+                  : providerMode === 'openai'
+                    ? `${Math.round(ready.classification.confidence * 100)}% as reported by the model (not a calibrated probability)`
+                    : fake
+                      ? 'Not meaningful: the Fake AI returns a fixed placeholder value.'
+                      : 'Not shown: the AI provider could not be confirmed.'}
+            </dd>
             <dt>Epitaph</dt>
             <dd>{ready.epitaph.text}</dd>
             <dt>Visible facts</dt>
-            <dd>{ready.epitaph.visibleFacts}</dd>
+            <dd>
+              {ready.epitaph.visibleFacts || 'None recorded.'}
+              {ready.epitaph.visibleFacts && <small className="sg-muted"> ({describeEpitaphAuxiliaryOrigin(ready.epitaph.origin, providerMode)})</small>}
+            </dd>
             {ready.epitaph.inferredIntent !== null && (
               <>
                 <dt>Guessed purpose</dt>
-                <dd>{ready.epitaph.inferredIntent}</dd>
+                <dd>
+                  {ready.epitaph.inferredIntent}
+                  <small className="sg-muted"> ({describeEpitaphAuxiliaryOrigin(ready.epitaph.origin, providerMode)})</small>
+                </dd>
               </>
             )}
             <dt>Source</dt>
             <dd>
               Category {describeOrigin(ready.classification.origin, providerMode)} (version{' '}
-              {ready.classification.versionNumber}).
+              {ready.classification.versionNumber}). Epitaph {describeOrigin(ready.epitaph.origin, providerMode)} (version{' '}
+              {ready.epitaph.versionNumber}).
             </dd>
           </dl>
         </div>

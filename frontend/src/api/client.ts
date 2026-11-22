@@ -1,3 +1,5 @@
+import { normalizeAnalysisOrigin } from './analysisOrigin';
+
 // Minimal, typed API client for the Screenshot Graveyard backend.
 //
 // All requests are same-origin; the workspace identity travels in an HttpOnly
@@ -126,7 +128,9 @@ export type ListResult =
   | { ok: true; screenshots: Screenshot[] }
   | { ok: false; error: string };
 
-function isScreenshot(value: unknown): value is Screenshot {
+type RawAnalysis = Omit<ScreenshotAnalysis, 'epitaphOrigin'> & { epitaphOrigin?: unknown };
+
+function isScreenshot(value: unknown): value is Omit<Screenshot, 'analysis'> & { analysis: RawAnalysis | null } {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
   return (
@@ -142,15 +146,14 @@ function isScreenshot(value: unknown): value is Screenshot {
   );
 }
 
-function isAnalysisOrNull(value: unknown): value is ScreenshotAnalysis | null {
+function isAnalysisOrNull(value: unknown): value is RawAnalysis | null {
   if (value === null) return true;
   if (typeof value !== 'object' || value === undefined) return false;
   const a = value as Record<string, unknown>;
   return (
     typeof a.category === 'string' &&
     typeof a.uncertain === 'boolean' &&
-    typeof a.epitaph === 'string' &&
-    typeof a.epitaphOrigin === 'string'
+    typeof a.epitaph === 'string'
   );
 }
 
@@ -186,7 +189,14 @@ export async function listScreenshots(
   if (!raw.every(isScreenshot)) {
     return { ok: false, error: 'Unexpected response shape' };
   }
-  return { ok: true, screenshots: raw as Screenshot[] };
+  const screenshots = raw.map((shot): Screenshot => ({
+    ...shot,
+    analysis: shot.analysis && {
+      ...shot.analysis,
+      epitaphOrigin: normalizeAnalysisOrigin(shot.analysis.epitaphOrigin),
+    },
+  }));
+  return { ok: true, screenshots };
 }
 
 // The authorized bytes endpoint. Returned as a URL for an <img src>; the browser

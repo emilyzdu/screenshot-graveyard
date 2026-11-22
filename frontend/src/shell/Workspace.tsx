@@ -167,16 +167,39 @@ export function ScreenshotCard({
         <p>
           {shot.savedLabel} · {shot.sizeLabel}
         </p>
+        {shot.analysisSummary && (
+          <p className="sg-shot__analysis">
+            {shot.statusLabel && <span className="sg-shot__status">{shot.statusLabel}</span>}
+            <span>
+              <b>{shot.analysisSummary.category}</b>
+              {shot.analysisSummary.uncertain && <span className="sg-shot__flag"> · uncertain</span>}
+            </span>
+            <span className="sg-shot__epitaph">{shot.analysisSummary.epitaph}</span>
+            <span className="sg-shot__provenance">{shot.analysisSummary.provenance}</span>
+          </p>
+        )}
       </div>
       <div className="sg-shot__foot">
-        {actionLabel ? (
+        {shot.chosenLabel ? (
+          <span className="sg-chip sg-chip--chosen">
+            <Icon name="check" size={14} />
+            Chosen by you: <b>{shot.chosenLabel}</b>
+          </span>
+        ) : shot.ruleSuggestionLabel ? (
+          <span className="sg-chip" title="A fixed rule based on the saved category, not an AI recommendation">
+            <Icon name="sparkles" size={14} />
+            Suggested (rule): <b>{shot.ruleSuggestionLabel}</b>
+          </span>
+        ) : actionLabel ? (
           <span className="sg-chip">
             <Icon name={icon} size={14} />
             Suggested: <b>{actionLabel}</b>
           </span>
         ) : (
           <span className="sg-chip sg-chip--quiet">
-            {shot.statusLabel ?? (shot.local ? 'Local preview, not uploaded' : 'No suggestion')}
+            {shot.analysisSummary
+              ? 'No suggestion'
+              : (shot.statusLabel ?? (shot.local ? 'Local preview, not uploaded' : 'No suggestion'))}
           </span>
         )}
         <button type="button" className="sg-link" onClick={(e) => onOpen(e.currentTarget)} aria-label={`View ${shot.title}`}>

@@ -6,6 +6,8 @@
 // the HTTP status and server error code so the UI can distinguish consent (403),
 // quota (429), not-found (404) and outages (503) without guessing.
 
+import { normalizeAnalysisOrigin } from './analysisOrigin';
+
 export interface ApiFailure {
   ok: false;
   /** HTTP status, or 0 for a network failure / unparseable response. */
@@ -162,26 +164,26 @@ function parseAccepted(b: unknown): Accepted | null {
   if (!op || !isObj(b)) return null;
   return { ...op, warning: typeof b.warning === 'string' ? b.warning : null };
 }
-function parseAnalysis(b: unknown): Analysis | null {
-  if (!isObj(b) || typeof b.screenshotId !== 'number') return null;
+function parseAnalysis(b: unknown, screenshotId: number): Analysis | null {
+  if (!isObj(b) || b.screenshotId !== screenshotId) return null;
   const c = b.classification;
   const e = b.epitaph;
   if (!isObj(c) || !isObj(e)) return null;
   if (!CATEGORIES.includes(c.category as Category)) return null;
   if (typeof c.confidence !== 'number' || typeof c.uncertain !== 'boolean') return null;
-  if (typeof c.versionNumber !== 'number' || typeof c.origin !== 'string') return null;
+  if (typeof c.versionNumber !== 'number') return null;
   if (typeof e.text !== 'string' || typeof e.visibleFacts !== 'string') return null;
   if (typeof e.uncertain !== 'boolean') return null;
-  if (typeof e.versionNumber !== 'number' || typeof e.origin !== 'string') return null;
+  if (typeof e.versionNumber !== 'number') return null;
   if (e.inferredIntent !== null && typeof e.inferredIntent !== 'string') return null;
   return {
-    screenshotId: b.screenshotId,
+    screenshotId,
     classification: {
       category: c.category as Category,
       confidence: c.confidence,
       uncertain: c.uncertain,
       versionNumber: c.versionNumber,
-      origin: c.origin,
+      origin: normalizeAnalysisOrigin(c.origin),
     },
     epitaph: {
       text: e.text,
@@ -189,7 +191,7 @@ function parseAnalysis(b: unknown): Analysis | null {
       inferredIntent: e.inferredIntent as string | null,
       uncertain: e.uncertain,
       versionNumber: e.versionNumber,
-      origin: e.origin,
+      origin: normalizeAnalysisOrigin(e.origin),
     },
   };
 }
@@ -270,14 +272,14 @@ export function getOperation(operationId: number, f: Fetch = fetch) {
   return call(`/api/operations/${operationId}`, {}, parseOperation, f);
 }
 export function getAnalysis(id: number, f: Fetch = fetch) {
-  return call(`/api/screenshots/${id}/analysis`, {}, parseAnalysis, f);
+  return call(`/api/screenshots/${id}/analysis`, {}, (body) => parseAnalysis(body, id), f);
 }
 export function editAnalysis(
   id: number,
   edit: { category?: Category; epitaphText?: string },
   f: Fetch = fetch,
 ) {
-  return call(`/api/screenshots/${id}/analysis/edits`, { method: 'POST', json: edit }, parseAnalysis, f);
+  return call(`/api/screenshots/${id}/analysis/edits`, { method: 'POST', json: edit }, (body) => parseAnalysis(body, id), f);
 }
 
 // -------------------------------------------------------------- study notes
