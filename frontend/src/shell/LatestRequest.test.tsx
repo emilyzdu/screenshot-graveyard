@@ -15,6 +15,11 @@ const ai = vi.hoisted(() => ({
   getProviderMode: vi.fn<() => Promise<ApiResult<ProviderMode>>>(),
   getConsent: vi.fn(), setConsent: vi.fn(), classifyScreenshot: vi.fn(), getOperation: vi.fn(),
   getAnalysis: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Analysis>>>(),
+  // Batch 4A: no Make Notes preparation exists unless a test says otherwise.
+  getMakeNotesPreparation: vi.fn<typeof import('../api/ai').getMakeNotesPreparation>(() =>
+    Promise.resolve({ ok: false as const, status: 404, code: 'no_preparation', message: 'No preparation yet' })),
+  requestMakeNotesDraft: vi.fn(),
+  getStudyNote: vi.fn(),
 }));
 vi.mock('../api/ai', () => ai);
 import LiveWorkspace from './LiveWorkspace';

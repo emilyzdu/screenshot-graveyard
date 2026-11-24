@@ -318,6 +318,55 @@ export function listStudyNotes(f: Fetch = fetch) {
     f,
   );
 }
+// ------------------------------------------------- draft preparation (Batch 4A)
+/**
+ * One Make Notes preparation for one screenshot. `provider` is what the server
+ * recorded when it accepted the request ("fake" = simulated draft), not the
+ * current provider mode. `reused` is true when the server returned an existing
+ * running or finished preparation instead of starting a new one.
+ */
+export interface Preparation {
+  screenshotId: number;
+  action: 'make_notes';
+  operationId: number;
+  status: OperationStatus;
+  artifactId: number | null;
+  errorDetail: string | null;
+  provider: string | null;
+  reused: boolean;
+}
+
+function parsePreparation(b: unknown, screenshotId: number): Preparation | null {
+  if (!isObj(b) || b.screenshotId !== screenshotId || b.action !== 'make_notes') return null;
+  if (typeof b.operationId !== 'number' || typeof b.status !== 'string' || !STATUSES.includes(b.status)) return null;
+  if (b.artifactId !== null && typeof b.artifactId !== 'number') return null;
+  return {
+    screenshotId,
+    action: 'make_notes',
+    operationId: b.operationId,
+    status: b.status as OperationStatus,
+    artifactId: b.artifactId as number | null,
+    errorDetail: typeof b.errorDetail === 'string' ? b.errorDetail : null,
+    provider: typeof b.provider === 'string' ? b.provider : null,
+    reused: b.reused === true,
+  };
+}
+
+/** Explicitly start (or reuse) the Make Notes draft for one screenshot. CSRF-guarded POST. */
+export function requestMakeNotesDraft(screenshotId: number, f: Fetch = fetch) {
+  return call(
+    `/api/screenshots/${screenshotId}/preparations`,
+    { method: 'POST', json: { action: 'make_notes' } },
+    (b) => parsePreparation(b, screenshotId),
+    f,
+  );
+}
+
+/** The newest Make Notes preparation for one screenshot (404 `no_preparation` when none). */
+export function getMakeNotesPreparation(screenshotId: number, f: Fetch = fetch) {
+  return call(`/api/screenshots/${screenshotId}/preparations/make_notes`, {}, (b) => parsePreparation(b, screenshotId), f);
+}
+
 export function getStudyNote(artifactId: number, versionId?: number, f: Fetch = fetch) {
   const q = versionId === undefined ? '' : `?versionId=${versionId}`;
   return call(`/api/study-notes/${artifactId}${q}`, {}, parseNoteVersion, f);

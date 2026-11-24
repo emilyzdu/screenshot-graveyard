@@ -215,6 +215,33 @@ class WorkspaceRepository:
     def get_screenshot(self, screenshot_id: int) -> models.Screenshot | None:
         return self._get_owned(models.Screenshot, screenshot_id)
 
+    def get_screenshot_locked(self, screenshot_id: int) -> models.Screenshot | None:
+        """Fresh, workspace-scoped read for a final check inside a locked section.
+
+        Call only after `lock_workspace()` in the same transaction.
+        `populate_existing` bypasses the identity map, so a value cached by an
+        earlier read in this session (for example `state == "active"`) is
+        replaced by the committed row.
+
+        * SQLite: the caller already holds the database write lock, so no other
+          connection can commit a change to this row until the caller's
+          transaction ends; this read sees every earlier commit.
+        * PostgreSQL: `FOR UPDATE` row-locks the screenshot, waiting for any
+          in-flight writer (e.g. Safe Burial's UPDATE) and then reading its
+          committed result. Lock order is workspace row -> screenshot row; no
+          path takes them in the opposite order.
+        """
+        stmt = (
+            select(models.Screenshot)
+            .where(
+                models.Screenshot.id == screenshot_id,
+                models.Screenshot.workspace_id == self._workspace_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return self._session.scalars(stmt).one_or_none()
+
     def list_screenshots(self, state: str | None = None) -> list[models.Screenshot]:
         stmt = select(models.Screenshot).where(
             models.Screenshot.workspace_id == self._workspace_id
@@ -412,7 +439,12 @@ class WorkspaceRepository:
     # ------------------------------- operation -------------------------------
 
     def create_operation(
-        self, *, kind: str, status: str = "pending", artifact_id: int | None = None
+        self,
+        *,
+        kind: str,
+        status: str = "pending",
+        artifact_id: int | None = None,
+        idempotency_key: str | None = None,
     ) -> models.Operation:
         if status not in OPERATION_STATUSES:
             raise InvalidOperationStatusError("invalid operation status")
@@ -425,6 +457,7 @@ class WorkspaceRepository:
             kind=kind,
             status=status,
             artifact_id=artifact_id,
+            idempotency_key=idempotency_key,
         )
         self._session.add(op)
         self._session.flush()
@@ -432,6 +465,23 @@ class WorkspaceRepository:
 
     def get_operation(self, operation_id: int) -> models.Operation | None:
         return self._get_owned(models.Operation, operation_id)
+
+    def latest_operation_with_key_prefix(self, prefix: str) -> models.Operation | None:
+        """Newest owned operation whose idempotency key starts with ``prefix``.
+
+        Workspace-scoped like every query here; the prefix is matched literally
+        (LIKE wildcards in it are escaped).
+        """
+        stmt = (
+            select(models.Operation)
+            .where(
+                models.Operation.workspace_id == self._workspace_id,
+                models.Operation.idempotency_key.startswith(prefix, autoescape=True),
+            )
+            .order_by(models.Operation.id.desc())
+            .limit(1)
+        )
+        return self._session.scalars(stmt).first()
 
     def set_operation_status(
         self, operation_id: int, status: str, error_detail: str | None = None

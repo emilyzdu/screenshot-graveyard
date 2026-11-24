@@ -276,3 +276,15 @@
 .sg-next__ready { display: grid; gap: 8px; padding: 10px; border-radius: 12px; border: 1px dashed var(--sg-line-strong); font-size: 13px; }
 .sg-next__ready p { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }
 .sg-assistant .sg-live-links { padding: 10px 0 0; border-top: 1px solid var(--sg-line); }
+
+/* ---------- Make Notes draft (Batch 4A) ---------- */
+.sg-draft { display: grid; gap: 8px; }
+.sg-draft__status { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--sg-lavender); }
+.sg-draft__status svg { animation: sg-spin 2.4s linear infinite; }
+.sg-draft__ready { display: grid; gap: 8px; padding: 10px; border-radius: 12px; border: 1px solid rgba(98, 211, 148, 0.4); background: rgba(98, 211, 148, 0.06); font-size: 13px; }
+.sg-draft__ready > p { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }
+.sg-draft__body { display: grid; gap: 8px; padding: 12px; border-radius: 10px; background: rgba(13, 8, 19, 0.55); border: 1px solid var(--sg-line); }
+.sg-draft__body h4 { margin: 0; font-size: 15px; color: #fff; }
+.sg-draft__body ul { margin: 0; padding-left: 18px; }
+.sg-draft__simulated { margin: 0; padding: 8px 10px; border-radius: 8px; border: 1px dashed var(--sg-peach); color: #ffc999; font-size: 12px; }
+.sg-draft__code { margin: 0; padding: 8px; border-radius: 6px; background: #0d0813; color: var(--sg-lavender); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }

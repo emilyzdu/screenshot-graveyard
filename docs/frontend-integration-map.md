@@ -112,3 +112,25 @@ Requests: displaying cards sends nothing beyond the list and authorized image re
 - **Replace the disabled "Prepare draft"** with a real call, keep the "Chosen by you" vs "Suggested" distinction, and add Review → Approve → Deliver states with no external writes until explicit approval.
 - **Multi-select** stays constrained to one screenshot until a batch contract exists.
 - The consent-dispatch race (task 7.1) must be fixed before any real-provider Prepare.
+
+## Batch 4A: Make Notes draft (Prepare → Persist → Reopen)
+
+Reused unchanged: the `study_note` pipeline (`StudyNoteService.run_generation`: re-checks ownership and consent, reads bytes, ONE adapter call, strict validation, atomic artifact + version 1 + source reference + operation status), `GET /api/operations/{id}` polling, `GET /api/study-notes/{artifactId}` for reading, the per-workspace write lock, the AI quota and the stale-pending sweep. The draft IS a `study_note` artifact (own id, append-only versions with `origin`, source reference to the screenshot); it also appears in `GET /api/study-notes` and the classic workspace.
+
+New, smallest extension (no migration, no new table; uses the existing unused `operation.idempotency_key` column):
+
+| Route | Purpose | Responses |
+|---|---|---|
+| `POST /api/screenshots/{id}/preparations` body `{"action":"make_notes"}` (CSRF) | Explicitly start, or reuse, the Make Notes draft for one screenshot | 202 new (`reused:false`), 200 existing (`reused:true`), 403 `consent_required`, 404 missing/foreign, 409 `screenshot_archived` / `provider_not_permitted`, 422 any other body, 429 quota, 503 |
+| `GET /api/screenshots/{id}/preparations/make_notes` | Latest preparation, for reopening after a reload | 200 `{operationId, status, artifactId, errorDetail, provider}`, 404 `no_preparation`, 404 missing/foreign |
+
+Server rules (`services/preparation_service.py`, `routers/preparations.py`):
+- Order: action → provider guard (`AI_PROVIDER` must be `fake`) → ownership (workspace-scoped, foreign = 404) → active (archived = 409) → under the workspace lock: reuse, or consent → quota → create.
+- Idempotency key `prepare:make_notes:screenshot:{id}:provider:{provider}`; the newest operation with prefix `prepare:make_notes:screenshot:{id}:` is reused while it is `pending` or produced an artifact. Only a failure without a draft allows a new attempt. Find-then-create runs under the lock, so concurrent requests create one operation.
+- Consent and quota are checked only when a new operation is created; returning an existing draft processes nothing.
+- The worker re-checks provider and active state, then runs the unchanged Study Note worker (which re-checks consent).
+- Provenance: version `origin` (`ai_generate` / `manual_edit`) plus the provider recorded in the key; the UI labels Fake drafts "Simulated" from that record, not from the current mode.
+
+Frontend: `shell/MakeNotesDraft.tsx` in the Live Quiet Assistant. States: checking, ready to prepare, preparing, draft ready, failed (Retry), refused (with reason), unresolved (Check status), lookup error (Check again). Lost POST responses are reconciled with the GET, never re-sent. Read-only draft view; no approve, export or delivery.
+
+Release blocker (unchanged): the consent check-to-dispatch race (tasks.md 7.1) and provider-scoped consent must be fixed before any real provider; until then the prepare route and worker fail closed for any provider other than `fake`.

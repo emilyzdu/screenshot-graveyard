@@ -130,6 +130,62 @@ class OperationService:
             raise OperationServiceUnavailableError("operation service unavailable") from exc
         return self._state(operation)
 
+    def create_or_reuse_keyed(
+        self,
+        kind: str,
+        idempotency_key: str,
+        *,
+        key_prefix: str,
+        reusable: Callable[[OperationState], bool],
+        before_create: Callable[[], None] | None = None,
+        after_lock: Callable[[], None] | None = None,
+    ) -> tuple[OperationState, bool]:
+        """Return the newest reusable keyed operation, or create one (Batch 4A).
+
+        Runs under the same per-workspace write lock as ``create_pending``, so the
+        find-then-insert is atomic: two concurrent requests for the same
+        ``key_prefix`` cannot both create an operation. ``reusable`` decides
+        whether the newest matching operation stands (for example: still pending,
+        or it produced an artifact). ``before_create`` runs inside the lock only
+        when a new operation is needed (for example a consent check); if it
+        raises, nothing is written. ``after_lock`` runs inside the lock before
+        both the reuse lookup and creation (for example a final eligibility
+        check that must hold for either outcome); if it raises, nothing is
+        written. Returns ``(state, reused)``.
+        """
+        if kind not in AI_OPERATION_KINDS:
+            raise ValueError("invalid operation kind")
+        if not idempotency_key.startswith(key_prefix):
+            raise ValueError("idempotency key must start with its prefix")
+        try:
+            if self._repo.lock_workspace() is None:
+                raise OperationServiceUnavailableError("operation service unavailable")
+            if after_lock is not None:
+                after_lock()
+            existing = self._repo.latest_operation_with_key_prefix(key_prefix)
+            if existing is not None:
+                state = self._state(existing)
+                if reusable(state):
+                    self._session.rollback()  # release the lock; nothing changed
+                    return state, True
+            if before_create is not None:
+                before_create()
+            self._repo.ensure_ai_quota(config.MAX_AI_CALLS_PER_WORKSPACE)
+            operation = self._repo.create_operation(
+                kind=kind, status="pending", idempotency_key=idempotency_key
+            )
+            self._session.commit()
+        except QuotaExceededError as exc:
+            self._session.rollback()
+            raise OperationQuotaExceededError("AI operation quota exceeded") from exc
+        except SQLAlchemyError as exc:
+            self._session.rollback()
+            raise OperationServiceUnavailableError("operation service unavailable") from exc
+        except BaseException:
+            self._session.rollback()
+            raise
+        return self._state(operation), False
+
     def get(self, operation_id: int) -> OperationState:
         """Read an owned operation, treating absent and foreign IDs identically."""
         try:

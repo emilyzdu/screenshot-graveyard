@@ -20,6 +20,11 @@ const ai = vi.hoisted(() => ({
   classifyScreenshot: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Accepted>>>(),
   getOperation: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Operation>>>(),
   getAnalysis: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Analysis>>>(),
+  // Batch 4A: no Make Notes preparation exists unless a test says otherwise.
+  getMakeNotesPreparation: vi.fn<typeof import('../api/ai').getMakeNotesPreparation>(() =>
+    Promise.resolve({ ok: false as const, status: 404, code: 'no_preparation', message: 'No preparation yet' })),
+  requestMakeNotesDraft: vi.fn(),
+  getStudyNote: vi.fn(),
 }));
 vi.mock('../api/ai', () => ai);
 import LiveWorkspace from './LiveWorkspace';
@@ -161,11 +166,27 @@ describe('Batch 3B Quiet Assistant', () => {
     expect(within(a).getByText('Chosen by you')).toBeInTheDocument();
     expect(within(a).getByText('(you accepted the suggestion)')).toBeInTheDocument();
     expect(within(a).queryByText('Suggested · rule-based')).not.toBeInTheDocument();
-    expect(within(a).getByText('Ready to prepare.')).toBeInTheDocument();
-    expect(within(a).getByRole('button', { name: 'Prepare draft' })).toBeDisabled();
-    expect(within(a).getByText(/Nothing has been created, saved or sent/)).toBeInTheDocument();
+    // Batch 4A: Make Notes can now be prepared, but only by an explicit click.
+    expect(await within(a).findByText('Ready to prepare.')).toBeInTheDocument();
+    expect(within(a).getByRole('button', { name: 'Prepare draft' })).toBeEnabled();
+    expect(within(a).getByText(/Nothing is approved, exported or sent to another app/)).toBeInTheDocument();
     expect(card('lecture.png')).toHaveTextContent('Chosen by you: Make Notes');
     expect(sideEffects()).toEqual(before);
+    expect(ai.requestMakeNotesDraft).not.toHaveBeenCalled();
+  });
+
+  it('an action other than Make Notes still cannot be prepared, and says so', async () => {
+    render(<LiveWorkspace />);
+    await screen.findByRole('article', { name: 'lecture.png' });
+    await select('lecture.png');
+    await within(assistant()).findByText('Visible facts');
+    fireEvent.click(within(assistant()).getByRole('button', { name: /Something else/ }));
+    await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Add to Calendar' })); });
+    const a = assistant();
+    expect(within(a).getByRole('button', { name: 'Prepare draft' })).toBeDisabled();
+    expect(within(a).getByText(/Preparing a draft for Add to Calendar is not available yet; only Make Notes/)).toBeInTheDocument();
+    expect(within(a).getByText(/Nothing has been created, saved or sent/)).toBeInTheDocument();
+    expect(ai.requestMakeNotesDraft).not.toHaveBeenCalled();
   });
 
   it('"Something else" overrides with the user\'s own choice, and Clear choice returns to the suggestion', async () => {

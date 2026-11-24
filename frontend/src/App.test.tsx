@@ -31,6 +31,8 @@ vi.mock('./api/ai', () => ({
   listStudyNoteVersions: vi.fn(),
   saveStudyNoteEdit: vi.fn(),
   studyNoteExportUrl: () => '/export',
+  getMakeNotesPreparation: () => Promise.resolve({ ok: false, status: 404, code: 'no_preparation', message: 'No preparation yet' }),
+  requestMakeNotesDraft: vi.fn(),
   CATEGORIES: [],
 }));
 
