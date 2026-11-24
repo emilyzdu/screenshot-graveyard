@@ -134,3 +134,31 @@ Server rules (`services/preparation_service.py`, `routers/preparations.py`):
 Frontend: `shell/MakeNotesDraft.tsx` in the Live Quiet Assistant. States: checking, ready to prepare, preparing, draft ready, failed (Retry), refused (with reason), unresolved (Check status), lookup error (Check again). Lost POST responses are reconciled with the GET, never re-sent. Read-only draft view; no approve, export or delivery.
 
 Release blocker (unchanged): the consent check-to-dispatch race (tasks.md 7.1) and provider-scoped consent must be fixed before any real provider; until then the prepare route and worker fail closed for any provider other than `fake`.
+
+## Batch 4B: Calendar event draft (Add to Calendar → Prepare → Persist → Reopen)
+
+Reused: the Batch 4A preparation endpoint and its rules unchanged (provider guard, workspace-scoped ownership, the locked fresh active-state re-check, idempotency key, reuse rule, consent then quota then create), the operation lifecycle and polling, the append-only `artifact` / `artifact_version` / `source_reference` tables, the AI quota and the stale-pending sweep. No migration: `event_draft` is a new value of the existing string `kind` columns.
+
+| Route | Purpose | Responses |
+|---|---|---|
+| `POST /api/screenshots/{id}/preparations` body `{"action":"add_calendar"}` (CSRF) | Start, or reuse, the event draft for one screenshot | Same as Make Notes. Operation kind `event_draft`; key `prepare:add_calendar:screenshot:{id}:provider:{provider}` |
+| `GET /api/screenshots/{id}/preparations/add_calendar` | Latest event preparation, for reopening | Same as Make Notes |
+| `GET /api/event-drafts/{artifactId}[?versionId=]` | Read a retained version (current by default) | 200 `{artifactId, versionId, versionNumber, origin, sourceScreenshotIds, content}`, 404 missing / foreign / not an event draft, 401 / 503 |
+| `GET /api/event-drafts/{artifactId}/versions` | All retained versions, oldest first | 200 `{versions: [{versionId, versionNumber, origin, isCurrent}]}`, 404 |
+
+There is no edit, approve, delete or delivery route, and nothing writes to Google Calendar or any other application.
+
+`content` (`EventDraftResult`, strict, `extra="forbid"`): `title`, `start_date` / `end_date` (`YYYY-MM-DD`), `start_time` / `end_time` (local `HH:MM`), `all_day` (bool), `time_zone` (IANA name, validated against the runtime zone list; `tzdata` is pinned so hosts without system zoneinfo still validate), `location`, `description`, `missing_fields`, `uncertain_fields`, `references` (= `[screenshotId]`). Rules: every unknown core field is `null` AND listed in `missing_fields`; nothing is defaulted (no "today", no browser time zone, no assumed duration); a time without a time zone, an end before the start, an end without a start, and a value listed as missing are all rejected. An operation ends `uncertain` whenever anything is missing or uncertain.
+
+Worker (`services/event_draft_service.py`): pending + kind check → consent → read the original → consent again → heartbeat → ONE `adapter.event_draft` call → strict re-validation → references check → atomic artifact + version 1 + source reference + status. The Fake adapter returns a clearly simulated draft (title "Simulated event draft (Fake AI)" marked uncertain; every date, time, time zone and location missing; a description saying it did not read the screenshot). `OpenAIVisionAdapter.event_draft` refuses with `AIAdapterError` before building any request.
+
+Frontend: `shell/CalendarDraft.tsx` beside `MakeNotesDraft.tsx` in the Live Quiet Assistant; both use the shared `shell/usePreparation.ts` state machine (extracted unchanged from 4A: lookup on mount, polling, busy guard, lost-response reconciliation, and the invocation-time check that the panel is mounted, its action is the current choice and the provider is Fake). Prepare is enabled only while Add to Calendar is chosen; Retry only while it is still chosen. The draft view shows each field exactly as saved, or an explicit "Missing" / "Not set" marker and an "Uncertain" badge; times are never converted or reformatted. Labels: "Draft ready", "Needs details", "Simulated draft · Fake AI", "Not added to Google Calendar or any other calendar".
+
+Open conflict for any later calendar delivery: see "Open conflict: external destination" in `.kiro/specs/screenshot-graveyard/prd-v2-additions.md` (Requirement 17.3 / 17.6 and ASSUMPTION A6 name OneNote / Google Docs as the single external destination).
+
+### Batch 4B remediation
+
+- Archived screenshots: the Crypt drawer shows a read-only "Saved drafts" section (`shell/ArchivedDrafts.tsx`) that reuses the same lookups and draft reads. Both panels run with `readOnly`, which forces `canStart` off, so no Prepare, Retry or Try again is shown and no captured handler can submit. With no saved drafts it says "No saved drafts for this screenshot."; Resurrection is unchanged.
+- Operation identity: a preparation answer must carry the action's own operation kind (`make_notes` → `study_note`, `add_calendar` → `event_draft`, `api/preparationKinds.ts`), and `pollOperation` treats an answer for another operation id or kind as an unreadable poll, never as done. Repeated mismatches end in the existing "Check status" state; nothing is re-sent.
+- Stored references: `GET /api/event-drafts/{id}` requires exactly one workspace-owned `source_reference` row whose screenshot is owned by the workspace and equals the payload's `references`; anything else is the generic 503 with no ids or content echoed.
+- Local times: a complete date + time must happen exactly once in its IANA zone. Times skipped by a forward transition are rejected; repeated (fall-back) times are accepted only when listed in `uncertain_fields`. Nothing is shifted, and no offset or duration is invented.

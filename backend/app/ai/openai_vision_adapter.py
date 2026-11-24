@@ -22,7 +22,7 @@ from pydantic import BaseModel, ValidationError
 from app import config
 from app.ai.adapter import AIAdapterError, AIAdapterTimeoutError, default_timeout_seconds
 from app.ai.redo_instructions import RedoInstructionsError, normalize_redo_instructions
-from app.ai.schemas import ClassificationResult, StudyNoteResult
+from app.ai.schemas import ClassificationResult, EventDraftResult, StudyNoteResult
 
 
 class _ResponsesClient(Protocol):
@@ -165,6 +165,15 @@ class OpenAIVisionAdapter:
         if result.references != ordered_ids:
             raise AIAdapterError("AI output failed validation")
         return result
+
+    def event_draft(self, images: list[tuple[int, bytes, str]]) -> EventDraftResult:
+        """Refused: event drafts are Fake-AI-only until the consent-dispatch fix ships.
+
+        Raises before touching the images or the client, so no request is built
+        and nothing is sent.
+        """
+        del images
+        raise AIAdapterError("event drafts are not supported by this provider")
 
     @staticmethod
     def _guidance(instructions: str | None) -> list[dict[str, str]]:

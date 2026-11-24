@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from app import config
-from app.ai.schemas import ClassificationResult, StudyNoteResult
+from app.ai.schemas import ClassificationResult, EventDraftResult, StudyNoteResult
 
 
 class AIAdapterError(Exception):
@@ -84,5 +84,16 @@ class AIAdapter(Protocol):
         screenshot ids flow through to `StudyNoteResult.references` to preserve
         provenance (INV-7). ``instructions`` has the same untrusted, Redo-only
         meaning as for `classify_and_epitaph`.
+        """
+        ...
+
+    def event_draft(self, images: list[tuple[int, bytes, str]]) -> EventDraftResult:
+        """Prepare one calendar event DRAFT from ONE screenshot (Batch 4B).
+
+        ``images`` has the same (screenshot_id, image_bytes, mime) shape as
+        `study_note`; the ids flow through to `EventDraftResult.references`.
+        An implementation must never invent dates, times, time zones or
+        locations: anything it cannot read is ``None`` and listed in
+        ``missing_fields``. No external calendar is ever written.
         """
         ...

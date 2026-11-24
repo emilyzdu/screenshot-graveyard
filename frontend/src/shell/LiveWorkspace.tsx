@@ -19,6 +19,7 @@ import {
 import { CRYPT_GALLERY_NOTE } from '../ai/messages';
 import { useProviderStatus } from '../ai/PrivacyNotice';
 import { RevivePanel } from './RevivePanel';
+import { ArchivedDrafts } from './ArchivedDrafts';
 import { LiveAssistant } from './LiveAssistant';
 import { LIVE_ACTIONS, epitaphProvenanceLabel, type ActionChoice } from './nextAction';
 import { useValidatedAnalysis } from './useValidatedAnalysis';
@@ -688,6 +689,8 @@ export default function LiveWorkspace() {
               analysisAuthority={analysisAuthority}
             />
           )}
+          {/* An archived screenshot's saved drafts stay readable; active ones live in the assistant. */}
+          {detailRecord && detailArchived && <ArchivedDrafts screenshot={detailRecord} providerMode={provider.mode} />}
           {pending && pendingId === Number(detailShot.id) && (
             <p role="status">{pending.kind === 'archive' ? 'Burying…' : 'Resurrecting…'} You can close this panel; the request keeps going.</p>
           )}

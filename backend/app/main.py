@@ -266,6 +266,8 @@ def create_app(
     application.include_router(build_study_note_artifacts_router())
     from app.routers.preparations import build_preparations_router
     application.include_router(build_preparations_router())
+    from app.routers.event_drafts import build_event_drafts_router
+    application.include_router(build_event_drafts_router())
     from app.routers.study_selection import build_study_selection_router
     application.include_router(build_study_selection_router())
 

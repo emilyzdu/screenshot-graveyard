@@ -288,3 +288,7 @@
 .sg-draft__body ul { margin: 0; padding-left: 18px; }
 .sg-draft__simulated { margin: 0; padding: 8px 10px; border-radius: 8px; border: 1px dashed var(--sg-peach); color: #ffc999; font-size: 12px; }
 .sg-draft__code { margin: 0; padding: 8px; border-radius: 6px; background: #0d0813; color: var(--sg-lavender); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Batch 4B: read-only saved drafts in an archived screenshot's drawer. */
+.sg-draft-list { display: grid; gap: 10px; margin-top: 14px; }
+.sg-draft-list > h4 { margin: 0; }

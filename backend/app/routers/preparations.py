@@ -1,6 +1,7 @@
-"""Make Notes draft preparation routes (Batch 4A).
+"""Draft preparation routes: Make Notes (Batch 4A) and Add to Calendar (Batch 4B).
 
-  * POST /api/screenshots/{id}/preparations      body {"action": "make_notes"}
+  * POST /api/screenshots/{id}/preparations
+        body {"action": "make_notes"} or {"action": "add_calendar"}
         202 + operationId when a new preparation was started,
         200 + the existing operation when one is still running or already
         produced a draft (idempotent: repeated clicks and concurrent requests
@@ -11,8 +12,10 @@
 
 Identity is the trusted server-resolved workspace only (401/503 fail closed);
 a foreign or missing screenshot is the same generic 404. Poll a started
-operation with the existing GET /api/operations/{id}; read the draft with the
-existing GET /api/study-notes/{artifactId}. Responses never contain image bytes.
+operation with the existing GET /api/operations/{id}; read a notes draft with
+GET /api/study-notes/{artifactId} and an event draft with
+GET /api/event-drafts/{artifactId}. Responses never contain image bytes.
+Nothing is written to any external calendar or application.
 """
 
 from __future__ import annotations
@@ -37,7 +40,9 @@ from app.services.operation_service import (
     OperationService,
     OperationServiceUnavailableError,
 )
+from app.services.event_draft_service import EventDraftService
 from app.services.preparation_service import (
+    ACTION_ADD_CALENDAR,
     PERMITTED_PROVIDERS,
     Preparation,
     PreparationNotActiveError,
@@ -52,8 +57,8 @@ from app.services.study_note_service import StudyNoteService
 
 class PreparationBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # Any other value is a 422: only Make Notes can be prepared in this version.
-    action: Literal["make_notes"]
+    # Any other value is a 422: only these two actions can be prepared.
+    action: Literal["make_notes", "add_calendar"]
 
 
 def _error_body(code: str, message: str) -> dict:
@@ -97,7 +102,31 @@ def _fail(workspace_id: int, operation_id: int, detail: str) -> None:
 
 
 def _run_make_notes_job(workspace_id: int, screenshot_id: int, operation_id: int) -> None:
-    """BackgroundTask body. Re-checks the guards, then the unchanged Study Note worker.
+    """BackgroundTask body. Re-checks the guards, then the unchanged Study Note worker."""
+    _run_guarded(
+        workspace_id,
+        screenshot_id,
+        operation_id,
+        lambda session: StudyNoteService(session, workspace_id, adapter=get_ai_adapter()).run_generation(
+            [screenshot_id], operation_id
+        ),
+    )
+
+
+def _run_event_draft_job(workspace_id: int, screenshot_id: int, operation_id: int) -> None:
+    """BackgroundTask body. Re-checks the guards, then the Event Draft worker."""
+    _run_guarded(
+        workspace_id,
+        screenshot_id,
+        operation_id,
+        lambda session: EventDraftService(session, workspace_id, adapter=get_ai_adapter()).run_generation(
+            screenshot_id, operation_id
+        ),
+    )
+
+
+def _run_guarded(workspace_id: int, screenshot_id: int, operation_id: int, generate) -> None:
+    """Provider, existence and active-state guards shared by every preparation job.
 
     The worker itself re-checks ownership and consent before any bytes are read,
     makes exactly one adapter call and persists the draft atomically.
@@ -118,9 +147,7 @@ def _run_make_notes_job(workspace_id: int, screenshot_id: int, operation_id: int
                 session.close()
                 _fail(workspace_id, operation_id, "Screenshot archived")
                 return
-            StudyNoteService(session, workspace_id, adapter=get_ai_adapter()).run_generation(
-                [screenshot_id], operation_id
-            )
+            generate(session)
         except Exception:
             session.rollback()
             raise
@@ -150,7 +177,7 @@ def build_preparations_router() -> APIRouter:
                 prep = PreparationService(session, workspace_id).request(screenshot_id, body.action)
             except PreparationUnsupportedActionError:
                 return JSONResponse(status_code=400, content=_error_body(
-                    "unsupported_action", "Only Make Notes can be prepared in this version"))
+                    "unsupported_action", "This action cannot be prepared in this version"))
             except PreparationProviderBlockedError:
                 return JSONResponse(status_code=409, content=_error_body(
                     "provider_not_permitted",
@@ -174,7 +201,8 @@ def build_preparations_router() -> APIRouter:
         if prep.reused:
             # Existing preparation stands: nothing new is scheduled or processed.
             return JSONResponse(status_code=status.HTTP_200_OK, content=_preparation_dict(prep))
-        background.add_task(_run_make_notes_job, workspace_id, screenshot_id, prep.operation.operation_id)
+        job = _run_event_draft_job if body.action == ACTION_ADD_CALENDAR else _run_make_notes_job
+        background.add_task(job, workspace_id, screenshot_id, prep.operation.operation_id)
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content=_preparation_dict(prep))
 
     @router.get("/{screenshot_id}/preparations/{action}", response_model=None)
@@ -188,7 +216,7 @@ def build_preparations_router() -> APIRouter:
                 prep = PreparationService(session, workspace_id).latest(screenshot_id, action)
             except PreparationUnsupportedActionError:
                 return JSONResponse(status_code=400, content=_error_body(
-                    "unsupported_action", "Only Make Notes can be prepared in this version"))
+                    "unsupported_action", "This action cannot be prepared in this version"))
             except PreparationNotFoundError:
                 return JSONResponse(status_code=404, content=_error_body("not_found", "Not Found"))
             except PreparationUnavailableError:

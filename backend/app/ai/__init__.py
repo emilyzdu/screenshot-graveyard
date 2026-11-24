@@ -10,6 +10,7 @@ from app.ai.schemas import (
     Category,
     ClassificationResult,
     EpitaphPayload,
+    EventDraftResult,
     StudyNoteResult,
 )
 from app.ai.adapter import AIAdapter, AIAdapterError, AIAdapterTimeoutError
@@ -19,6 +20,7 @@ __all__ = [
     "Category",
     "ClassificationResult",
     "EpitaphPayload",
+    "EventDraftResult",
     "StudyNoteResult",
     "AIAdapter",
     "AIAdapterError",

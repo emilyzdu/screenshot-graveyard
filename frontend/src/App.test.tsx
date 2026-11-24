@@ -33,6 +33,9 @@ vi.mock('./api/ai', () => ({
   studyNoteExportUrl: () => '/export',
   getMakeNotesPreparation: () => Promise.resolve({ ok: false, status: 404, code: 'no_preparation', message: 'No preparation yet' }),
   requestMakeNotesDraft: vi.fn(),
+  getEventDraftPreparation: () => Promise.resolve({ ok: false, status: 404, code: 'no_preparation', message: 'No preparation yet' }),
+  requestEventDraft: vi.fn(),
+  getEventDraft: vi.fn(),
   CATEGORIES: [],
 }));
 

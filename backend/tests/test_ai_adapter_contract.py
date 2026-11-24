@@ -25,9 +25,12 @@ from app.ai import (
     Category,
     ClassificationResult,
     EpitaphPayload,
+    EventDraftResult,
     StudyNoteResult,
 )
 from app.ai.adapter import default_timeout_seconds
+
+_ALL_UNKNOWN = ("title", "start_date", "start_time", "end_date", "end_time", "all_day", "time_zone")
 
 
 # --------------------------------------------------------------- sample output
@@ -148,6 +151,11 @@ def test_adapter_protocol_methods_exist_with_expected_signatures():
     assert sn.parameters["instructions"].kind is inspect.Parameter.KEYWORD_ONLY
     assert sn.parameters["instructions"].default is None
     assert get_type_hints(AIAdapter.study_note)["return"] is StudyNoteResult
+    # Batch 4B: one-screenshot calendar event draft, same image tuple shape.
+    assert hasattr(AIAdapter, "event_draft")
+    ed = inspect.signature(AIAdapter.event_draft)
+    assert list(ed.parameters)[1:] == ["images"]
+    assert get_type_hints(AIAdapter.event_draft)["return"] is EventDraftResult
 
 
 def test_default_timeout_is_positive_and_configurable():
@@ -168,6 +176,9 @@ def test_a_conforming_stub_satisfies_the_runtime_checkable_protocol():
 
         def study_note(self, images: list[tuple[int, bytes, str]]) -> StudyNoteResult:
             return StudyNoteResult.model_validate(_sample_study_note())
+
+        def event_draft(self, images: list[tuple[int, bytes, str]]) -> EventDraftResult:
+            return EventDraftResult(title=None, missing_fields=list(_ALL_UNKNOWN), references=[1])
 
     stub = _StubAdapter()
     assert isinstance(stub, AIAdapter)  # runtime_checkable structural conformance

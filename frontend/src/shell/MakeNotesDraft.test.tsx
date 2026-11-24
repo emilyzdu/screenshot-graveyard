@@ -18,6 +18,10 @@ const ai = vi.hoisted(() => ({
   getMakeNotesPreparation: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Preparation>>>(),
   requestMakeNotesDraft: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Preparation>>>(),
   getStudyNote: vi.fn<(artifactId: number, versionId?: number, f?: typeof fetch) => Promise<ApiResult<StudyNoteVersion>>>(),
+  // Batch 4B: the calendar panel is mounted alongside; no event draft unless a test says so.
+  getEventDraftPreparation: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Preparation>>>(),
+  requestEventDraft: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Preparation>>>(),
+  getEventDraft: vi.fn(),
 }));
 vi.mock('../api/ai', () => ai);
 import LiveWorkspace from './LiveWorkspace';
@@ -56,6 +60,7 @@ beforeEach(() => {
   ai.getConsent.mockResolvedValue({ ok: true, data: true });
   ai.getAnalysis.mockImplementation(async (id) => ({ ok: true, data: analysis(id, id === 2 ? 'Shopping/Inspiration' : 'Study/Knowledge') }));
   ai.getMakeNotesPreparation.mockResolvedValue(fail(404, 'no_preparation'));
+  ai.getEventDraftPreparation.mockResolvedValue(fail(404, 'no_preparation'));
   ai.getOperation.mockResolvedValue(op('successful', 501));
   ai.getStudyNote.mockImplementation(async (aid) => ({ ok: true, data: note(aid, [1]) }));
 });
@@ -358,5 +363,29 @@ describe('Make Notes: retry follows the current action', () => {
     await act(async () => { fireEvent.click(within(region()).getByRole('button', { name: 'Open draft' })); });
     expect(within(region()).getByText('Synthetic study note fixture')).toBeInTheDocument();
     expect(ai.requestMakeNotesDraft).not.toHaveBeenCalled();
+  });
+});
+
+describe('B2: Make Notes polling only accepts its own study_note operation', () => {
+  it.each([
+    ['an event_draft operation', { kind: 'event_draft' as const }],
+    ['another operation id', { operationId: 999 }],
+  ])('a successful answer for %s is never shown as Draft ready', async (_n, over) => {
+    ai.requestMakeNotesDraft.mockResolvedValue({ ok: true, data: prep(1) });
+    ai.getOperation.mockResolvedValue({ ok: true, data: { operationId: 70, kind: 'study_note', status: 'successful', errorDetail: null, artifactId: 601, ...over } });
+    render(<LiveWorkspace />);
+    await screen.findByRole('article', { name: 'lecture.png' });
+    const btn = await chooseMakeNotes();
+    vi.useFakeTimers();
+    try {
+      await act(async () => { fireEvent.click(btn); await vi.advanceTimersByTimeAsync(0); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(within(region()).queryByText('Draft ready')).not.toBeInTheDocument();
+    expect(within(region()).getByRole('button', { name: 'Check status' })).toBeInTheDocument();
+    expect(ai.getStudyNote).not.toHaveBeenCalled();
+    expect(ai.requestMakeNotesDraft).toHaveBeenCalledTimes(1);
   });
 });

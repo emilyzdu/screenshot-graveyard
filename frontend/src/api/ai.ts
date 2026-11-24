@@ -7,6 +7,7 @@
 // quota (429), not-found (404) and outages (503) without guessing.
 
 import { normalizeAnalysisOrigin } from './analysisOrigin';
+import { OPERATION_KIND_BY_ACTION, type PreparationAction } from './preparationKinds';
 
 export interface ApiFailure {
   ok: false;
@@ -18,7 +19,7 @@ export interface ApiFailure {
 export type ApiResult<T> = { ok: true; data: T } | ApiFailure;
 
 export type OperationStatus = 'pending' | 'successful' | 'failed' | 'uncertain';
-export type OperationKind = 'classify' | 'study_note' | 'redo';
+export type OperationKind = 'classify' | 'study_note' | 'redo' | 'event_draft';
 export type ProviderMode = 'fake' | 'openai';
 
 export const CATEGORIES = [
@@ -150,7 +151,7 @@ function parseOperation(b: unknown): Operation | null {
   if (!isObj(b)) return null;
   if (typeof b.operationId !== 'number' || typeof b.status !== 'string') return null;
   if (!STATUSES.includes(b.status)) return null;
-  if (b.kind !== 'classify' && b.kind !== 'study_note' && b.kind !== 'redo') return null;
+  if (b.kind !== 'classify' && b.kind !== 'study_note' && b.kind !== 'redo' && b.kind !== 'event_draft') return null;
   return {
     operationId: b.operationId,
     kind: b.kind,
@@ -318,16 +319,17 @@ export function listStudyNotes(f: Fetch = fetch) {
     f,
   );
 }
-// ------------------------------------------------- draft preparation (Batch 4A)
+// ------------------------------------------- draft preparation (Batch 4A / 4B)
+export type { PreparationAction } from './preparationKinds';
 /**
- * One Make Notes preparation for one screenshot. `provider` is what the server
+ * One draft preparation for one screenshot and action. `provider` is what the server
  * recorded when it accepted the request ("fake" = simulated draft), not the
  * current provider mode. `reused` is true when the server returned an existing
  * running or finished preparation instead of starting a new one.
  */
 export interface Preparation {
   screenshotId: number;
-  action: 'make_notes';
+  action: PreparationAction;
   operationId: number;
   status: OperationStatus;
   artifactId: number | null;
@@ -336,13 +338,14 @@ export interface Preparation {
   reused: boolean;
 }
 
-function parsePreparation(b: unknown, screenshotId: number): Preparation | null {
-  if (!isObj(b) || b.screenshotId !== screenshotId || b.action !== 'make_notes') return null;
+function parsePreparation(b: unknown, screenshotId: number, action: PreparationAction): Preparation | null {
+  if (!isObj(b) || b.screenshotId !== screenshotId || b.action !== action) return null;
+  if (b.kind !== OPERATION_KIND_BY_ACTION[action]) return null; // another action's operation is never accepted
   if (typeof b.operationId !== 'number' || typeof b.status !== 'string' || !STATUSES.includes(b.status)) return null;
   if (b.artifactId !== null && typeof b.artifactId !== 'number') return null;
   return {
     screenshotId,
-    action: 'make_notes',
+    action,
     operationId: b.operationId,
     status: b.status as OperationStatus,
     artifactId: b.artifactId as number | null,
@@ -352,19 +355,143 @@ function parsePreparation(b: unknown, screenshotId: number): Preparation | null 
   };
 }
 
-/** Explicitly start (or reuse) the Make Notes draft for one screenshot. CSRF-guarded POST. */
-export function requestMakeNotesDraft(screenshotId: number, f: Fetch = fetch) {
+function requestPreparation(screenshotId: number, action: PreparationAction, f: Fetch) {
   return call(
     `/api/screenshots/${screenshotId}/preparations`,
-    { method: 'POST', json: { action: 'make_notes' } },
-    (b) => parsePreparation(b, screenshotId),
+    { method: 'POST', json: { action } },
+    (b) => parsePreparation(b, screenshotId, action),
     f,
   );
 }
 
+function getPreparation(screenshotId: number, action: PreparationAction, f: Fetch) {
+  return call(
+    `/api/screenshots/${screenshotId}/preparations/${action}`,
+    {},
+    (b) => parsePreparation(b, screenshotId, action),
+    f,
+  );
+}
+
+/** Explicitly start (or reuse) the Make Notes draft for one screenshot. CSRF-guarded POST. */
+export function requestMakeNotesDraft(screenshotId: number, f: Fetch = fetch) {
+  return requestPreparation(screenshotId, 'make_notes', f);
+}
+
 /** The newest Make Notes preparation for one screenshot (404 `no_preparation` when none). */
 export function getMakeNotesPreparation(screenshotId: number, f: Fetch = fetch) {
-  return call(`/api/screenshots/${screenshotId}/preparations/make_notes`, {}, (b) => parsePreparation(b, screenshotId), f);
+  return getPreparation(screenshotId, 'make_notes', f);
+}
+
+/** Explicitly start (or reuse) the calendar event draft for one screenshot (Batch 4B). CSRF-guarded POST. */
+export function requestEventDraft(screenshotId: number, f: Fetch = fetch) {
+  return requestPreparation(screenshotId, 'add_calendar', f);
+}
+
+/** The newest calendar event draft preparation for one screenshot (404 `no_preparation` when none). */
+export function getEventDraftPreparation(screenshotId: number, f: Fetch = fetch) {
+  return getPreparation(screenshotId, 'add_calendar', f);
+}
+
+// ------------------------------------------------------ event draft (Batch 4B)
+export const EVENT_DRAFT_FIELDS = [
+  'title', 'start_date', 'start_time', 'end_date', 'end_time', 'all_day', 'time_zone', 'location', 'description',
+] as const;
+export type EventDraftField = (typeof EVENT_DRAFT_FIELDS)[number];
+
+/**
+ * A persisted calendar event DRAFT. Unknown values are `null` and named in
+ * `missingFields`; nothing is defaulted. Dates are `YYYY-MM-DD`, times are
+ * local `HH:MM` in `timeZone` (IANA). Nothing here has been sent to a calendar.
+ */
+export interface EventDraftContent {
+  title: string | null;
+  startDate: string | null;
+  startTime: string | null;
+  endDate: string | null;
+  endTime: string | null;
+  allDay: boolean | null;
+  timeZone: string | null;
+  location: string | null;
+  description: string | null;
+  missingFields: EventDraftField[];
+  uncertainFields: EventDraftField[];
+  references: number[];
+}
+
+export interface EventDraftVersion {
+  artifactId: number;
+  versionId: number;
+  versionNumber: number;
+  origin: string;
+  sourceScreenshotIds: number[];
+  content: EventDraftContent;
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const strOrNull = (v: unknown, re?: RegExp): v is string | null =>
+  v === null || (typeof v === 'string' && v.length > 0 && (re === undefined || re.test(v)));
+const fieldList = (v: unknown): v is EventDraftField[] =>
+  Array.isArray(v) && v.every((x) => (EVENT_DRAFT_FIELDS as readonly unknown[]).includes(x));
+
+function parseEventDraft(b: unknown): EventDraftVersion | null {
+  if (!isObj(b) || !isObj(b.content)) return null;
+  const c = b.content;
+  if (
+    typeof b.artifactId !== 'number' ||
+    typeof b.versionId !== 'number' ||
+    typeof b.versionNumber !== 'number' ||
+    typeof b.origin !== 'string' ||
+    !isIntArr(b.sourceScreenshotIds)
+  ) {
+    return null;
+  }
+  if (
+    !strOrNull(c.title) ||
+    !strOrNull(c.start_date, DATE_RE) ||
+    !strOrNull(c.start_time, TIME_RE) ||
+    !strOrNull(c.end_date, DATE_RE) ||
+    !strOrNull(c.end_time, TIME_RE) ||
+    !(c.all_day === null || typeof c.all_day === 'boolean') ||
+    !strOrNull(c.time_zone) ||
+    !strOrNull(c.location) ||
+    !strOrNull(c.description) ||
+    !fieldList(c.missing_fields) ||
+    !fieldList(c.uncertain_fields) ||
+    !isIntArr(c.references)
+  ) {
+    return null;
+  }
+  // A missing field must really be empty: never show a value the server called unknown.
+  const content = c as Record<EventDraftField, unknown>;
+  if (c.missing_fields.some((f) => content[f] !== null)) return null;
+  return {
+    artifactId: b.artifactId,
+    versionId: b.versionId,
+    versionNumber: b.versionNumber,
+    origin: b.origin,
+    sourceScreenshotIds: b.sourceScreenshotIds,
+    content: {
+      title: c.title,
+      startDate: c.start_date,
+      startTime: c.start_time,
+      endDate: c.end_date,
+      endTime: c.end_time,
+      allDay: c.all_day,
+      timeZone: c.time_zone,
+      location: c.location,
+      description: c.description,
+      missingFields: c.missing_fields,
+      uncertainFields: c.uncertain_fields,
+      references: c.references,
+    },
+  };
+}
+
+/** Read one persisted event draft (current version by default). Read-only. */
+export function getEventDraft(artifactId: number, f: Fetch = fetch) {
+  return call(`/api/event-drafts/${artifactId}`, {}, parseEventDraft, f);
 }
 
 export function getStudyNote(artifactId: number, versionId?: number, f: Fetch = fetch) {

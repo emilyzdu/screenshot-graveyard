@@ -5,6 +5,7 @@ import { getReviveEntry, getReviveSuccess } from '../ai/reviveCoordinator';
 import { Ghost } from '../ui/Ghost';
 import { Icon } from '../ui/Icon';
 import { Badge, Button, MenuButton } from '../ui/primitives';
+import { CalendarDraft } from './CalendarDraft';
 import { MakeNotesDraft } from './MakeNotesDraft';
 import {
   LIVE_ACTIONS,
@@ -298,7 +299,7 @@ function OneScreenshot({
           )}
         </div>
 
-        {choice && choice.action !== 'make_notes' && (
+        {choice && choice.action !== 'make_notes' && choice.action !== 'add_calendar' && (
           <div className="sg-next__ready" role="note" aria-label="Ready to prepare">
             <p>
               <Icon name="check" size={15} /> <b>Ready to prepare.</b> {LIVE_ACTIONS[choice.action].hint}.
@@ -307,8 +308,8 @@ function OneScreenshot({
               Prepare draft
             </Button>
             <p className="sg-muted" id="sg-prepare-why">
-              Preparing a draft for {LIVE_ACTIONS[choice.action].label} is not available yet; only Make Notes can be
-              prepared in this version. Nothing has been created, saved or sent. Your choice is kept on this page only
+              Preparing a draft for {LIVE_ACTIONS[choice.action].label} is not available yet; only Make Notes and Add
+              to Calendar can be prepared in this version. Nothing has been created, saved or sent. Your choice is kept on this page only
               and is lost when you reload.
             </p>
           </div>
@@ -319,6 +320,12 @@ function OneScreenshot({
           screenshot={shot}
           providerMode={providerMode}
           canStart={choice?.action === 'make_notes'}
+        />
+        <CalendarDraft
+          key={`calendar-${id}`}
+          screenshot={shot}
+          providerMode={providerMode}
+          canStart={choice?.action === 'add_calendar'}
         />
       </section>
     </>

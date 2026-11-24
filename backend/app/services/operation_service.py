@@ -30,7 +30,8 @@ from app import config
 from app.db.repository import CrossWorkspaceError, QuotaExceededError, WorkspaceRepository
 
 
-AI_OPERATION_KINDS = frozenset({"classify", "study_note", "redo"})
+# event_draft (Batch 4B) is a metered AI operation like the others.
+AI_OPERATION_KINDS = frozenset({"classify", "study_note", "redo", "event_draft"})
 
 
 @dataclass

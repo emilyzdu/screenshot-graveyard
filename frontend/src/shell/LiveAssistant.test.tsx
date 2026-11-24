@@ -24,6 +24,11 @@ const ai = vi.hoisted(() => ({
   getMakeNotesPreparation: vi.fn<typeof import('../api/ai').getMakeNotesPreparation>(() =>
     Promise.resolve({ ok: false as const, status: 404, code: 'no_preparation', message: 'No preparation yet' })),
   requestMakeNotesDraft: vi.fn(),
+  // Batch 4B: no calendar event draft exists unless a test says otherwise.
+  getEventDraftPreparation: vi.fn<typeof import('../api/ai').getEventDraftPreparation>(() =>
+    Promise.resolve({ ok: false as const, status: 404, code: 'no_preparation', message: 'No preparation yet' })),
+  requestEventDraft: vi.fn(),
+  getEventDraft: vi.fn(),
   getStudyNote: vi.fn(),
 }));
 vi.mock('../api/ai', () => ai);
@@ -175,18 +180,20 @@ describe('Batch 3B Quiet Assistant', () => {
     expect(ai.requestMakeNotesDraft).not.toHaveBeenCalled();
   });
 
-  it('an action other than Make Notes still cannot be prepared, and says so', async () => {
+  it.each(['Save as Memory', 'Add to Wishlist'])('%s still cannot be prepared, and says so', async (label) => {
     render(<LiveWorkspace />);
     await screen.findByRole('article', { name: 'lecture.png' });
     await select('lecture.png');
     await within(assistant()).findByText('Visible facts');
     fireEvent.click(within(assistant()).getByRole('button', { name: /Something else/ }));
-    await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Add to Calendar' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: label })); });
     const a = assistant();
     expect(within(a).getByRole('button', { name: 'Prepare draft' })).toBeDisabled();
-    expect(within(a).getByText(/Preparing a draft for Add to Calendar is not available yet; only Make Notes/)).toBeInTheDocument();
+    expect(within(a).getByText(new RegExp(`Preparing a draft for ${label} is not available yet; only Make Notes and Add`))).toBeInTheDocument();
     expect(within(a).getByText(/Nothing has been created, saved or sent/)).toBeInTheDocument();
+    expect(within(a).queryByRole('button', { name: 'Prepare event draft' })).not.toBeInTheDocument();
     expect(ai.requestMakeNotesDraft).not.toHaveBeenCalled();
+    expect(ai.requestEventDraft).not.toHaveBeenCalled();
   });
 
   it('"Something else" overrides with the user\'s own choice, and Clear choice returns to the suggestion', async () => {

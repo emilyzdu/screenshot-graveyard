@@ -4,9 +4,12 @@ import {
   editAnalysis,
   generateStudyNote,
   getAnalysis,
+  getEventDraft,
+  getEventDraftPreparation,
   getConsent,
   getProviderMode,
   getOperation,
+  requestEventDraft,
   saveStudyNoteEdit,
   setConsent,
   studyNoteExportUrl,
@@ -98,5 +101,72 @@ describe('AI API client', () => {
     expect(JSON.parse((f as ReturnType<typeof vi.fn>).mock.calls[0][1].body)).toEqual({ content });
     expect(studyNoteExportUrl(7)).toBe('/api/study-notes/7/export');
     expect(studyNoteExportUrl(7, 12)).toBe('/api/study-notes/7/export?versionId=12');
+  });
+});
+
+// Batch 4B: calendar event drafts.
+
+const eventBody = (over: Record<string, unknown> = {}, content: Record<string, unknown> = {}) => ({
+  artifactId: 8, versionId: 11, versionNumber: 1, origin: 'ai_generate', sourceScreenshotIds: [3],
+  content: {
+    title: 'Simulated event draft (Fake AI)', start_date: null, start_time: null, end_date: null, end_time: null,
+    all_day: null, time_zone: null, location: null, description: 'Placeholder text from the Fake AI.',
+    missing_fields: ['start_date', 'start_time', 'end_date', 'end_time', 'all_day', 'time_zone', 'location'],
+    uncertain_fields: ['title'], references: [3], ...content,
+  },
+  ...over,
+});
+
+describe('Calendar event draft API client (Batch 4B)', () => {
+  it('polls an event_draft operation like any other operation kind', async () => {
+    const r = await getOperation(4, fetchOf(() => json({ operationId: 4, kind: 'event_draft', status: 'uncertain', artifactId: 8 })));
+    expect(r).toEqual({ ok: true, data: { operationId: 4, kind: 'event_draft', status: 'uncertain', errorDetail: null, artifactId: 8 } });
+  });
+
+  it('posts add_calendar to the preparation route and parses the answer for that action only', async () => {
+    const body = { screenshotId: 3, action: 'add_calendar', operationId: 4, kind: 'event_draft', status: 'pending', artifactId: null, errorDetail: null, provider: 'fake', reused: false };
+    const f = fetchOf(() => json(body, 202));
+    const r = await requestEventDraft(3, f);
+    const [url, init] = (f as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe('/api/screenshots/3/preparations');
+    expect(JSON.parse(init.body)).toEqual({ action: 'add_calendar' });
+    expect(r.ok && r.data.action).toBe('add_calendar');
+    // A Make Notes answer is never accepted as a calendar preparation (or for another screenshot).
+    expect((await getEventDraftPreparation(3, fetchOf(() => json({ ...body, action: 'make_notes' })))).ok).toBe(false);
+    expect((await getEventDraftPreparation(4, fetchOf(() => json(body)))).ok).toBe(false);
+    const lookup = fetchOf(() => json(body));
+    expect((await getEventDraftPreparation(3, lookup)).ok).toBe(true);
+    const [lookupUrl, lookupInit] = (lookup as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(lookupUrl).toBe('/api/screenshots/3/preparations/add_calendar');
+    expect(lookupInit.method).toBe('GET');
+  });
+
+  it('parses a simulated draft with every unknown field kept empty', async () => {
+    const r = await getEventDraft(8, fetchOf(() => json(eventBody())));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.data.content.startDate).toBeNull();
+    expect(r.data.content.missingFields).toContain('time_zone');
+    expect(r.data.content.uncertainFields).toEqual(['title']);
+  });
+
+  it.each([
+    ['a missing field that has a value', {}, { start_date: '2026-12-01' }],
+    ['a malformed date', {}, { start_date: '12/01/2026', missing_fields: ['start_time', 'end_date', 'end_time', 'all_day', 'time_zone', 'location'] }],
+    ['a malformed time', {}, { start_time: '3pm', missing_fields: ['start_date', 'end_date', 'end_time', 'all_day', 'time_zone', 'location'] }],
+    ['an unknown field name', {}, { missing_fields: ['duration'] }],
+    ['a non-boolean all_day', {}, { all_day: 'no', missing_fields: ['start_date', 'start_time', 'end_date', 'end_time', 'time_zone', 'location'] }],
+    ['missing source ids', { sourceScreenshotIds: 'x' }, {}],
+  ])('rejects %s instead of showing it', async (_n, over, content) => {
+    expect((await getEventDraft(8, fetchOf(() => json(eventBody(over, content))))).ok).toBe(false);
+  });
+});
+
+describe('B2: preparation answers must carry the expected operation kind', () => {
+  const base = { screenshotId: 3, operationId: 4, status: 'pending', artifactId: null, errorDetail: null, provider: 'fake', reused: false };
+  it('rejects a calendar preparation whose operation is a study_note, and vice versa', async () => {
+    expect((await getEventDraftPreparation(3, fetchOf(() => json({ ...base, action: 'add_calendar', kind: 'study_note' })))).ok).toBe(false);
+    expect((await requestEventDraft(3, fetchOf(() => json({ ...base, action: 'add_calendar', kind: 'event_draft' }, 202)))).ok).toBe(true);
+    expect((await requestEventDraft(3, fetchOf(() => json({ ...base, action: 'add_calendar' }, 202)))).ok).toBe(false);
   });
 });

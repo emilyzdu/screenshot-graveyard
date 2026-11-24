@@ -49,6 +49,7 @@ class CountingFake:
     def __init__(self):
         self.mode = FakeAIAdapterMode.NORMAL
         self.calls = 0
+        self.event_calls = 0
 
     def classify_and_epitaph(self, image_bytes, mime, **kw):
         return FakeAIAdapter().classify_and_epitaph(image_bytes, mime, **kw)
@@ -56,6 +57,11 @@ class CountingFake:
     def study_note(self, images, **kw):
         self.calls += 1
         return FakeAIAdapter(mode=self.mode).study_note(images, **kw)
+
+    def event_draft(self, images):
+        # Batch 4B: counted separately so Make Notes assertions are unaffected.
+        self.event_calls += 1
+        return FakeAIAdapter(mode=self.mode).event_draft(images)
 
 
 @pytest.fixture()
@@ -384,8 +390,18 @@ def test_consent_is_checked_inside_the_lock_before_creating(env, monkeypatch):
 
 # ---------------------------------------------------------------- request boundary
 
-@pytest.mark.parametrize("body", [{"action": "add_calendar"}, {"action": "make_notes", "extra": 1}, {}, {"action": 1}])
-def test_only_an_explicit_make_notes_request_is_accepted(env, body):
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "save_memory"},
+        {"action": "add_wishlist"},
+        {"action": "make_notes", "extra": 1},
+        {"action": "add_calendar", "extra": 1},
+        {},
+        {"action": 1},
+    ],
+)
+def test_only_an_explicit_supported_action_request_is_accepted(env, body):
     make_client, eng, adapter = env
     c = make_client()
     sid = upload(c)
@@ -397,7 +413,7 @@ def test_unsupported_action_lookup_is_400(env):
     make_client, _, _ = env
     c = make_client()
     sid = upload(c)
-    assert c.get(f"/api/screenshots/{sid}/preparations/add_calendar").status_code == 400
+    assert c.get(f"/api/screenshots/{sid}/preparations/save_memory").status_code == 400
 
 
 def test_csrf_header_is_required(env):

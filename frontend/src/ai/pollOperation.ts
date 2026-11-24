@@ -1,4 +1,4 @@
-import { getOperation, type OperationStatus } from '../api/ai';
+import { getOperation, type OperationKind, type OperationStatus } from '../api/ai';
 import { boundedFetch } from '../api/boundedFetch';
 
 /** Stop after this many poll requests in a row failed (network, 5xx, ...). */
@@ -46,6 +46,12 @@ export async function pollOperation(
     signal?: AbortSignal;
     /** Upper bound for each status request; a request that exceeds it counts as a failed poll. */
     requestTimeoutMs?: number;
+    /**
+     * The kind the operation must have. An answer for another operation id or
+     * another kind is not this operation's status: it counts as a failed
+     * (unreadable) poll, so it can never be reported as done.
+     */
+    expectKind?: OperationKind;
   },
 ): Promise<PollOutcome> {
   let failures = 0;
@@ -59,7 +65,9 @@ export async function pollOperation(
     if (cancelled()) return { kind: 'cancelled' };
     const res = f ? await getOperation(operationId, f) : await getOperation(operationId);
     if (cancelled()) return { kind: 'cancelled' };
-    if (res.ok) {
+    const foreign =
+      res.ok && (res.data.operationId !== operationId || (opts.expectKind !== undefined && res.data.kind !== opts.expectKind));
+    if (res.ok && !foreign) {
       failures = 0;
       if (res.data.status !== 'pending') {
         return {
@@ -69,7 +77,7 @@ export async function pollOperation(
           artifactId: res.data.artifactId,
         };
       }
-    } else if (res.status === 404) {
+    } else if (!res.ok && res.status === 404) {
       return { kind: 'not_found' };
     } else {
       failures += 1;

@@ -14,9 +14,21 @@ Design source: `.kiro/specs/screenshot-graveyard/design.md`
 
 from __future__ import annotations
 
+import zoneinfo
+from datetime import date, datetime, time, timezone
 from enum import Enum
+from functools import lru_cache
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 
 class Category(str, Enum):
@@ -109,3 +121,164 @@ class StudyNoteResult(BaseModel):
         default_factory=list,
         description="Source Screenshot IDs this note was generated from (INV-7).",
     )
+
+
+# ------------------------------------------------------------- event draft (4B)
+
+EVENT_DRAFT_FIELDS: tuple[str, ...] = (
+    "title",
+    "start_date",
+    "start_time",
+    "end_date",
+    "end_time",
+    "all_day",
+    "time_zone",
+    "location",
+    "description",
+)
+EventDraftField = Literal[
+    "title",
+    "start_date",
+    "start_time",
+    "end_date",
+    "end_time",
+    "all_day",
+    "time_zone",
+    "location",
+    "description",
+]
+
+# Strings with strict patterns, not pydantic date/time: lax date parsing would
+# accept unix timestamps or datetime strings and silently coerce them.
+_ISO_DATE = r"^\d{4}-\d{2}-\d{2}$"
+_LOCAL_TIME = r"^([01]\d|2[0-3]):[0-5]\d$"
+_NOT_ZONES = frozenset({"Factory", "localtime", "posixrules"})
+
+
+def local_time_status(day: str, clock: str, zone: str) -> Literal["ok", "nonexistent", "ambiguous"]:
+    """Whether a local wall-clock time happens exactly once in ``zone`` on ``day``.
+
+    ``nonexistent``: skipped by a forward transition (e.g. DST spring-forward).
+    ``ambiguous``: happens twice (e.g. DST fall-back), so the offset is unknown.
+    Nothing is converted or replaced; this only classifies the given time.
+    """
+    tz = zoneinfo.ZoneInfo(zone)
+    naive = datetime.combine(date.fromisoformat(day), time.fromisoformat(clock))
+    first, second = naive.replace(tzinfo=tz, fold=0), naive.replace(tzinfo=tz, fold=1)
+    # Matching offsets mean there is no transition at this wall time. A UTC
+    # conversion is unnecessary and can overflow near the limits of datetime.
+    if first.utcoffset() == second.utcoffset():
+        return "ok"
+    # During a transition, a time that exists round-trips through UTC unchanged.
+    exists = any(
+        dt.astimezone(timezone.utc).astimezone(tz).replace(tzinfo=None) == naive for dt in (first, second)
+    )
+    return "ambiguous" if exists else "nonexistent"
+
+
+@lru_cache(maxsize=1)
+def iana_time_zones() -> frozenset[str]:
+    """IANA zone names known to this runtime (system zoneinfo or the pinned tzdata)."""
+    return frozenset(zoneinfo.available_timezones()) - _NOT_ZONES
+
+
+class EventDraftResult(BaseModel):
+    """Structured output of `event_draft` (Batch 4B): a calendar event DRAFT.
+
+    Nothing here is a fact about the screenshot unless an adapter says so, and
+    nothing is ever defaulted: no "today", no browser time zone, no assumed
+    duration. Every unknown core field is ``None`` AND named in
+    ``missing_fields``; a present-but-doubtful value is named in
+    ``uncertain_fields``. Dates are ISO ``YYYY-MM-DD``; times are local
+    wall-clock ``HH:MM`` in ``time_zone`` (an IANA name), never converted.
+    ``references`` are the source Screenshot IDs (INV-7).
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    start_date: str | None = Field(default=None, pattern=_ISO_DATE)
+    start_time: str | None = Field(default=None, pattern=_LOCAL_TIME)
+    end_date: str | None = Field(default=None, pattern=_ISO_DATE)
+    end_time: str | None = Field(default=None, pattern=_LOCAL_TIME)
+    all_day: StrictBool | None = None
+    time_zone: str | None = Field(default=None, min_length=1, max_length=64)
+    location: str | None = Field(default=None, min_length=1, max_length=300)
+    description: str | None = Field(default=None, min_length=1, max_length=2000)
+    missing_fields: list[EventDraftField] = Field(default_factory=list)
+    uncertain_fields: list[EventDraftField] = Field(default_factory=list)
+    references: list[StrictInt] = Field(min_length=1)
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _real_calendar_date(cls, v: str | None) -> str | None:
+        if v is not None:
+            date.fromisoformat(v)  # rejects 2026-02-30 etc.
+        return v
+
+    @field_validator("time_zone")
+    @classmethod
+    def _iana_zone(cls, v: str | None) -> str | None:
+        if v is not None and v not in iana_time_zones():
+            raise ValueError("time_zone must be a known IANA time zone")
+        return v
+
+    @field_validator("references")
+    @classmethod
+    def _positive_ids(cls, v: list[int]) -> list[int]:
+        if any(i <= 0 for i in v) or len(set(v)) != len(v):
+            raise ValueError("references must be distinct positive screenshot ids")
+        return v
+
+    @model_validator(mode="after")
+    def _honest_and_consistent(self) -> "EventDraftResult":
+        missing, uncertain = self.missing_fields, self.uncertain_fields
+        if len(set(missing)) != len(missing) or len(set(uncertain)) != len(uncertain):
+            raise ValueError("missing_fields and uncertain_fields must not repeat")
+        if set(missing) & set(uncertain):
+            raise ValueError("a field cannot be both missing and uncertain")
+        values = {f: getattr(self, f) for f in EVENT_DRAFT_FIELDS}
+        for f in missing:
+            if values[f] is not None:
+                raise ValueError(f"{f} is listed as missing but has a value")
+        for f in uncertain:
+            if values[f] is None:
+                raise ValueError(f"{f} is listed as uncertain but has no value")
+        # Unknown core fields must be declared, never silently left blank.
+        timed = self.all_day is not True
+        required = ["title", "start_date", "end_date", "all_day"]
+        if timed:
+            required += ["start_time", "end_time", "time_zone"]
+        for f in required:
+            if values[f] is None and f not in missing:
+                raise ValueError(f"{f} is unknown and must be listed in missing_fields")
+        if self.all_day is True and (self.start_time or self.end_time):
+            raise ValueError("an all-day event has no start or end time")
+        if (self.start_time or self.end_time) and self.time_zone is None:
+            raise ValueError("a time needs an explicit time zone")
+        if self.start_time and not self.start_date:
+            raise ValueError("start_time needs start_date")
+        if self.end_time and not self.end_date:
+            raise ValueError("end_time needs end_date")
+        if self.end_date and not self.start_date:
+            raise ValueError("end_date needs start_date")
+        # A complete local date + time must happen exactly once in its zone. A
+        # skipped time is impossible; a repeated time is only accepted when it is
+        # explicitly marked uncertain (its UTC offset is unknown). Never shifted.
+        for day, clock, field in (
+            (self.start_date, self.start_time, "start_time"),
+            (self.end_date, self.end_time, "end_time"),
+        ):
+            if day and clock and self.time_zone:
+                status = local_time_status(day, clock, self.time_zone)
+                if status == "nonexistent":
+                    raise ValueError(f"{field} does not exist in {self.time_zone} on {day}")
+                if status == "ambiguous" and field not in uncertain:
+                    raise ValueError(f"{field} is ambiguous in {self.time_zone} on {day} and must be listed in uncertain_fields")
+        if self.start_date and self.end_date:
+            start, end = date.fromisoformat(self.start_date), date.fromisoformat(self.end_date)
+            if end < start:
+                raise ValueError("the event cannot end before it starts")
+            if end == start and self.start_time and self.end_time and self.end_time <= self.start_time:
+                raise ValueError("the event must end after it starts")
+        return self

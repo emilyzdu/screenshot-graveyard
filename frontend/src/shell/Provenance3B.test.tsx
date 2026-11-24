@@ -18,6 +18,11 @@ const ai = vi.hoisted(() => ({
   getMakeNotesPreparation: vi.fn<typeof import('../api/ai').getMakeNotesPreparation>(() =>
     Promise.resolve({ ok: false as const, status: 404, code: 'no_preparation', message: 'No preparation yet' })),
   requestMakeNotesDraft: vi.fn(),
+  // Batch 4B: no calendar event draft exists unless a test says otherwise.
+  getEventDraftPreparation: vi.fn<typeof import('../api/ai').getEventDraftPreparation>(() =>
+    Promise.resolve({ ok: false as const, status: 404, code: 'no_preparation', message: 'No preparation yet' })),
+  requestEventDraft: vi.fn(),
+  getEventDraft: vi.fn(),
   getStudyNote: vi.fn(),
 }));
 vi.mock('../api/ai', () => ai);

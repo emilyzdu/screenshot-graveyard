@@ -1,7 +1,8 @@
-"""Make Notes draft preparation for ONE screenshot (Batch 4A).
+"""Draft preparation for ONE screenshot: Make Notes (4A) and Add to Calendar (4B).
 
-A thin, idempotent front door over the existing Study Note pipeline. It adds
-only what that pipeline lacks for a per-screenshot "Prepare" action:
+A thin, idempotent front door over the existing generation pipelines (Study
+Note for ``make_notes``; Event Draft for ``add_calendar``). It adds only what
+those pipelines lack for a per-screenshot "Prepare" action:
 
 * lifecycle eligibility: the screenshot must be owned AND active (the Study
   Note selection policy does not look at archive state);
@@ -14,10 +15,12 @@ only what that pipeline lacks for a per-screenshot "Prepare" action:
   operation and therefore one draft;
 * a lookup of the latest preparation, so a reloaded page can find its draft.
 
-The draft itself is the existing ``study_note`` artifact (own id, version 1,
-origin, source reference to the screenshot), produced by the unchanged
-``StudyNoteService.run_generation`` worker, which re-checks consent and
-ownership before any bytes are read. No external application is written to.
+A Make Notes draft is the existing ``study_note`` artifact, produced by the
+unchanged ``StudyNoteService.run_generation`` worker. A calendar draft is an
+``event_draft`` artifact produced by ``EventDraftService.run_generation``. Both
+have their own id, version 1, origin and a source reference to the screenshot,
+and both workers re-check consent and ownership before any bytes are read. No
+external application (calendar or otherwise) is written to.
 """
 
 from __future__ import annotations
@@ -33,10 +36,17 @@ from app.services.consent_service import ConsentService
 from app.services.operation_service import OperationService, OperationState
 
 ACTION_MAKE_NOTES = "make_notes"
-SUPPORTED_ACTIONS = frozenset({ACTION_MAKE_NOTES})
+ACTION_ADD_CALENDAR = "add_calendar"
+# Each action has its own operation kind (and therefore its own artifact kind
+# and worker). The idempotency key embeds the action, so two actions on one
+# screenshot never share an operation or a draft.
+OPERATION_KIND_BY_ACTION = {
+    ACTION_MAKE_NOTES: "study_note",
+    ACTION_ADD_CALENDAR: "event_draft",
+}
+SUPPORTED_ACTIONS = frozenset(OPERATION_KIND_BY_ACTION)
 # The only provider preparation may run with until the consent-dispatch fix ships.
 PERMITTED_PROVIDERS = frozenset({"fake"})
-_KIND = "study_note"
 
 
 class PreparationError(Exception):
@@ -148,7 +158,7 @@ class PreparationService:
         if shot.state != "active":
             raise PreparationNotActiveError("archived")  # fast path; not authoritative
         state, reused = self._operations.create_or_reuse_keyed(
-            _KIND,
+            OPERATION_KIND_BY_ACTION[action],
             idempotency_key(screenshot_id, action, provider),
             key_prefix=key_prefix(screenshot_id, action),
             reusable=is_reusable,

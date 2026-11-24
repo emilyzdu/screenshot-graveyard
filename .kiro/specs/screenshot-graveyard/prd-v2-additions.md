@@ -74,6 +74,46 @@ being pushed.
    confirmation before it runs.
 3. THE System SHALL preserve INV-1 to INV-10 for every planned action.
 
+### Requirement 21: Calendar event draft (P1, internal draft only)
+**User Story:** As a solo user, I want to choose Add to Calendar for one
+screenshot and get a saved event draft I can reopen later, so that I can review
+it before anything is put on a real calendar.
+1. WHEN the user explicitly chooses Add to Calendar for ONE active, owned
+   screenshot and asks to prepare it, THE System SHALL create at most one
+   persisted event draft for that screenshot (idempotent per screenshot and
+   provider), retained as an append-only versioned artifact with a source
+   reference to the screenshot.
+2. THE System SHALL check per-screenshot consent before creating the
+   operation, before reading the original and again before the adapter call;
+   without consent THE System SHALL NOT call the adapter.
+3. THE event draft SHALL hold title, start/end date, start/end local time,
+   all-day flag, IANA time zone, optional location and description, plus
+   explicit `missing_fields` and `uncertain_fields`. Every unknown core field
+   SHALL be empty AND listed as missing. THE System SHALL NOT default any value
+   (no "today", no browser time zone, no assumed duration) and SHALL reject a
+   time without an explicit time zone and an end before the start.
+4. THE System SHALL NOT present Fake AI output as extracted from the
+   screenshot. A simulated draft SHALL be labelled as simulated and SHALL
+   contain no date, time, time zone or location.
+5. THE System SHALL let a reloaded page reopen the saved draft without
+   preparing again, and SHALL keep it readable when another action is chosen
+   or the screenshot is archived.
+6. Retry SHALL be offered only while Add to Calendar is the current choice for
+   that screenshot.
+7. THE System SHALL NOT write to any external calendar or application. Review,
+   editing, approval and delivery are separate later requirements.
+8. Event draft preparation SHALL count toward the per-workspace AI quota and,
+   until tasks.md 7.1 is closed, SHALL run only with the Fake provider.
+
+### Open conflict: external destination for a future calendar delivery
+Requirement 21 adds no external write. A later Google Calendar delivery
+(planned as "Batch 6") would conflict with existing requirements that are NOT
+changed here: ASSUMPTION A6 and Requirement 17.3 (the single P1 external
+destination is OneNote, Google Docs as fallback) and Requirement 17.6 (no
+multiple external integrations). Before any calendar delivery is built, the
+product owner must either replace the approved destination or record an
+explicit exception, and the Delivery_Service rules (INV-8, INV-9) apply.
+
 ## Additional tasks
 
 Numbering uses an `A` prefix so no existing task number changes. Dependencies
@@ -119,6 +159,12 @@ refer to existing task numbers where relevant.
   - **Acceptance test:** plan output fails closed on schema violation, no action runs without confirmation, consent gate still blocks adapter calls, property tests keep INV-1 and INV-4.
   - **Priority:** P1, not started
 
+- [ ] A.8 `[P1]` Calendar event draft for one screenshot (Batch 4B)
+  - Add an `event_draft` adapter capability (Fake returns a clearly simulated draft with every date, time, time zone and location missing; the OpenAI adapter refuses), an `event_draft` operation and artifact kind, `add_calendar` on the existing preparation endpoint, and read-only `GET /api/event-drafts/{id}` and `/versions`. Frontend: Prepare Event Draft when Add to Calendar is chosen, honest states, read-only draft view. No migration, no external write, no editing or approval.
+  - **Dependencies:** Batch 4A preparation endpoint, 2.1, 2.3, 2.4
+  - **Requirements:** 21.1 to 21.8, INV-1, INV-4 to INV-7
+  - **Acceptance test:** backend router and schema tests (idempotency, two-connection concurrency and archive race, consent at each boundary, cross-workspace 404, quota, provider fail-closed, no network), a property test that accepted drafts declare every unknown and invent nothing, frontend tests for states, reload, retry gating and stale handlers, and an isolated browser run with Fake AI.
+  - **Priority:** P1
 ## Dependency-aware plan
 
 ```
@@ -136,6 +182,7 @@ Wave 5 (A.5). A.7 starts only after the PRD is re-supplied and A.4 is stable.
 | Consent gate, reversible versions, Crypt, Markdown export | Implemented (earlier tasks) |
 | A.1 to A.5 | Planned |
 | A.7 intent inference and tool planning | Planned, deferred, not implemented |
+| A.8 calendar event draft (internal draft only) | Implemented in Batch 4B, pending review |
 
 ## Addendum: updates after reading the real PRD v2.0
 
