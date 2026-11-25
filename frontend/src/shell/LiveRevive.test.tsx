@@ -30,6 +30,11 @@ const ai = vi.hoisted(() => ({
   getEventDraftPreparation: vi.fn<typeof import('../api/ai').getEventDraftPreparation>(() =>
     Promise.resolve({ ok: false as const, status: 404, code: 'no_preparation', message: 'No preparation yet' })),
   requestEventDraft: vi.fn(),
+  // Batch 5A: version history and edits (inert unless a test configures them).
+  listStudyNoteVersions: vi.fn(),
+  listEventDraftVersions: vi.fn(),
+  saveEventDraftEdit: vi.fn(),
+  saveStudyNoteEdit: vi.fn(),
   getEventDraft: vi.fn(),
   getStudyNote: vi.fn(),
 }));

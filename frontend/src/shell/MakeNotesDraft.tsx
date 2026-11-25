@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import {
   getMakeNotesPreparation,
   getStudyNote,
+  listStudyNoteVersions,
   requestMakeNotesDraft,
   type Preparation,
   type ProviderMode,
@@ -11,9 +12,15 @@ import type { Screenshot } from '../api/client';
 import { DEFAULT_MAX_POLLS, DEFAULT_POLL_INTERVAL_MS } from '../ai/useOperationPolling';
 import { Icon } from '../ui/Icon';
 import { Badge, Button } from '../ui/primitives';
-import { describeFailure, draftProvenance, usePreparation, type DraftPresence } from './usePreparation';
+import { boundedFetch } from '../api/boundedFetch';
+import { EarlierVersionBanner, FieldHistoryNotice, FieldOriginTag, SourceLink, VersionHistory } from './DraftReviewParts';
+import { describeSaved, originLabel, useDraftHistory, type SaveOutcomeText } from './draftHistory';
+import { NotesDraftEditor } from './NotesDraftEditor';
+import { DRAFT_REQUEST_TIMEOUT_MS, describeFailure, draftProvenance, usePreparation, type DraftPresence } from './usePreparation';
 
-type DraftView = { t: 'closed' } | { t: 'loading' } | { t: 'error' } | { t: 'open'; note: StudyNoteVersion };
+const loadNoteVersion = (artifactId: number, versionId: number | undefined, f: typeof fetch) =>
+  getStudyNote(artifactId, versionId, f);
+
 
 interface Props {
   screenshot: Screenshot;
@@ -60,20 +67,38 @@ export function MakeNotesDraft({
     maxPolls,
     onPresence,
   });
-  const [view, setView] = useState<DraftView>({ t: 'closed' });
+  const history = useDraftHistory<StudyNoteVersion>({
+    screenshotId: id,
+    loadVersion: loadNoteVersion,
+    listVersions: listStudyNoteVersions,
+    read,
+    signal,
+  });
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [notice, setNotice] = useState<SaveOutcomeText | null>(null);
+  const request = () => boundedFetch(DRAFT_REQUEST_TIMEOUT_MS, signal());
 
-  const onOpenDraft = async (artifactId: number) => {
-    const lifetime = signal();
-    setView({ t: 'loading' });
-    const res = await getStudyNote(artifactId, undefined, read());
-    if (lifetime.aborted) return;
-    // Only show a draft that belongs to this screenshot.
-    if (res.ok && res.data.artifactId === artifactId && res.data.sourceScreenshotIds.includes(id)) {
-      setView({ t: 'open', note: res.data });
-    } else {
-      setView({ t: 'error' });
-    }
+  // Read the CURRENT version once the draft is ready (GETs only), so the
+  // summary reflects saved edits; the body stays hidden until it is opened.
+  const readyArtifact = state.t === 'ready' ? state.prep.artifactId : null;
+  const openRef = useRef(history.open);
+  useLayoutEffect(() => {
+    openRef.current = history.open;
+  });
+  useEffect(() => {
+    if (readyArtifact !== null) void openRef.current(readyArtifact);
+  }, [readyArtifact]);
+
+  const onOpenDraft = (artifactId: number) => {
+    setExpanded(true);
+    if (history.state.t !== 'open') void history.open(artifactId);
   };
+  const h = history.state;
+  const loaded = h.t === 'open' ? h : null;
+  const uncertain = loaded
+    ? loaded.current.content.uncertain_content.length > 0
+    : state.t === 'ready' && state.prep.status === 'uncertain';
 
   if (state.t === 'checking') {
     return <p className="sg-muted" role="status">Checking for a Make Notes draft…</p>;
@@ -152,30 +177,81 @@ export function MakeNotesDraft({
         <div className="sg-draft__ready" role="status">
           <p>
             <Badge tone="green">Draft ready</Badge>{' '}
-            <Badge tone={draftProvenance(state.prep, view.t === 'open' ? view.note.origin : null).tone}>
-              {draftProvenance(state.prep, view.t === 'open' ? view.note.origin : null).badge}
+            <Badge tone={draftProvenance(state.prep, loaded ? loaded.current.origin : null).tone}>
+              {draftProvenance(state.prep, loaded ? loaded.current.origin : null).badge}
             </Badge>
           </p>
           <p className="sg-muted">
-            Saved in your workspace as draft #{state.prep.artifactId}. Not approved, not exported and not sent anywhere.
-            {state.prep.status === 'uncertain' && ' Parts of it are marked uncertain.'}
+            Saved in your workspace as draft #{state.prep.artifactId}
+            {loaded && `, version ${loaded.current.versionNumber}`}. Not approved, not exported and not sent anywhere.
+            {uncertain && ' Parts of it are marked uncertain.'}
           </p>
-          {view.t === 'open' ? (
-            <Button size="sm" onClick={() => setView({ t: 'closed' })}>Hide draft</Button>
+          {notice && <p role={notice.kind === 'error' ? 'alert' : 'status'}>{notice.text}</p>}
+          {expanded && loaded ? (
+            <Button size="sm" disabled={editing} onClick={() => { history.resetToCurrent(); setExpanded(false); }}>Hide draft</Button>
           ) : (
-            <Button size="sm" disabled={view.t === 'loading'} onClick={() => void onOpenDraft(state.prep.artifactId!)}>
-              {view.t === 'loading' ? 'Opening…' : 'Open draft'}
+            <Button size="sm" disabled={expanded && h.t === 'loading'} onClick={() => onOpenDraft(state.prep.artifactId!)}>
+              {expanded && h.t === 'loading' ? 'Opening…' : 'Open draft'}
             </Button>
           )}
-          {view.t === 'error' && <p role="alert">The draft could not be loaded. Try opening it again.</p>}
-          {view.t === 'open' && <DraftBody note={view.note} prep={state.prep} screenshotId={id} />}
+          {expanded && h.t === 'error' && <p role="alert">The draft could not be loaded. Try opening it again.</p>}
+          {expanded && loaded && (
+            <div className="sg-review">
+              {loaded.shown.versionId !== loaded.current.versionId && (
+                <EarlierVersionBanner versionNumber={loaded.shown.versionNumber} onBack={() => void history.show(loaded.current.versionId)} />
+              )}
+              {editing && loaded.shown.versionId === loaded.current.versionId ? (
+                <NotesDraftEditor
+                  checkLatest={() => history.peekCurrent(loaded.current.artifactId)}
+                  provider={state.prep.provider}
+                  note={loaded.current}
+                  request={request}
+                  onCancel={() => setEditing(false)}
+                  onSaved={(saved) => {
+                    setEditing(false);
+                    setNotice(describeSaved(saved.editResult, saved.versionNumber));
+                    void history.adopt(saved);
+                  }}
+                  onLoadLatest={() => {
+                    setEditing(false);
+                    setNotice({ kind: 'info', text: 'Loaded the latest version. Your unsaved changes were discarded.' });
+                    void history.open(loaded.current.artifactId);
+                  }}
+                />
+              ) : (
+                <>
+                  <DraftBody note={loaded.shown} prep={state.prep} screenshotId={id} />
+                  {!readOnly && loaded.shown.versionId === loaded.current.versionId && (
+                    <Button size="sm" onClick={() => { history.cancelPending(); setNotice(null); setEditing(true); }}>Edit draft</Button>
+                  )}
+                </>
+              )}
+              <VersionHistory
+                versions={loaded.versions}
+                shownId={loaded.shown.versionId}
+                provider={state.prep.provider}
+                disabled={editing}
+                onShow={(versionId) => void history.show(versionId)}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function Section({ title, items, code = false }: { title: string; items: string[]; code?: boolean }) {
+function Section({
+  title,
+  items,
+  code = false,
+  origin,
+}: {
+  title: string;
+  items: string[];
+  code?: boolean;
+  origin?: ReactNode;
+}) {
   if (items.length === 0) return null;
   return (
     <>
@@ -186,6 +262,7 @@ function Section({ title, items, code = false }: { title: string; items: string[
         ) : (
           <ul>{items.map((c, i) => <li key={i}>{c}</li>)}</ul>
         )}
+        {origin}
       </dd>
     </>
   );
@@ -193,35 +270,42 @@ function Section({ title, items, code = false }: { title: string; items: string[
 
 function DraftBody({ note, prep, screenshotId }: { note: StudyNoteVersion; prep: Preparation; screenshotId: number }) {
   const c = note.content;
-  const origin =
-    note.origin === 'manual_edit' ? 'edited by you' : note.origin === 'ai_redo' ? 'regenerated by AI' : 'generated by AI';
+  const provider = prep.provider;
+  const tag = (field: string) => <FieldOriginTag origins={note.fieldOrigins} field={field} provider={provider} />;
+  // Any section the Fake AI wrote and you have not changed is still simulated.
+  const simulatedSections = Object.values(note.fieldOrigins ?? {}).some((o) => o.origin === 'ai_generate' || o.origin === 'ai_redo');
+  const aiVersion = note.origin === 'ai_generate' || note.origin === 'ai_redo';
+  const simulated = provider === 'fake' && (aiVersion || simulatedSections);
   return (
     <article className="sg-draft__body" aria-label={`Notes draft: ${c.topic}`}>
-      {prep.provider === 'fake' && note.origin !== 'manual_edit' && (
+      {simulated && (
         <p className="sg-draft__simulated" role="note">
-          Simulated draft: the Fake AI wrote placeholder text without reading your screenshot. None of this was
-          extracted from the image.
+          {!aiVersion
+            ? 'Simulated draft: sections marked "Fake AI" were written by the Fake AI without reading your screenshot. Only sections marked "edited by you" came from you.'
+            : 'Simulated draft: the Fake AI wrote placeholder text without reading your screenshot. None of this was extracted from the image.'}
         </p>
       )}
+      <FieldHistoryNotice origins={note.fieldOrigins} />
       <h4>{c.topic}</h4>
+      <p>{tag('topic')}</p>
       <dl className="sg-facts">
-        <Section title="Main concepts" items={c.main_concepts} />
-        <Section title="Code" items={c.extracted_code} code />
-        <Section title="Code explanations" items={c.code_explanations} />
-        <Section title="Pitfalls" items={c.pitfalls} />
-        <Section title="Uncertain" items={c.uncertain_content} />
+        <Section title="Main concepts" items={c.main_concepts} origin={tag('main_concepts')} />
+        <Section title="Code" items={c.extracted_code} code origin={tag('extracted_code')} />
+        <Section title="Code explanations" items={c.code_explanations} origin={tag('code_explanations')} />
+        <Section title="Pitfalls" items={c.pitfalls} origin={tag('pitfalls')} />
+        <Section title="Uncertain" items={c.uncertain_content} origin={tag('uncertain_content')} />
         <dt>Source</dt>
         <dd>
           Screenshot #{screenshotId}
-          {note.sourceScreenshotIds.length > 1 && ` and ${note.sourceScreenshotIds.length - 1} more`}
+          {note.sourceScreenshotIds.length > 1 && ` and ${note.sourceScreenshotIds.length - 1} more`}{' '}
+          <SourceLink screenshotId={screenshotId} />
         </dd>
         <dt>Version</dt>
         <dd>
-          Version {note.versionNumber}, {origin}
-          {prep.provider === 'fake' && note.origin !== 'manual_edit' ? ' (Fake AI, simulated)' : ''}.
+          Version {note.versionNumber}, {originLabel(note.origin, provider)}.
         </dd>
       </dl>
-      <p className="sg-muted">Editing, review and approval come in a later version; the classic workspace can edit study notes.</p>
+      <p className="sg-muted">Approval comes in a later version. This draft is not exported and not sent anywhere.</p>
     </article>
   );
 }

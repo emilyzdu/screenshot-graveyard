@@ -162,3 +162,27 @@ Open conflict for any later calendar delivery: see "Open conflict: external dest
 - Operation identity: a preparation answer must carry the action's own operation kind (`make_notes` → `study_note`, `add_calendar` → `event_draft`, `api/preparationKinds.ts`), and `pollOperation` treats an answer for another operation id or kind as an unreadable poll, never as done. Repeated mismatches end in the existing "Check status" state; nothing is re-sent.
 - Stored references: `GET /api/event-drafts/{id}` requires exactly one workspace-owned `source_reference` row whose screenshot is owned by the workspace and equals the payload's `references`; anything else is the generic 503 with no ids or content echoed.
 - Local times: a complete date + time must happen exactly once in its IANA zone. Times skipped by a forward transition are rejected; repeated (fall-back) times are accepted only when listed in `uncertain_fields`. Nothing is shifted, and no offset or duration is invented.
+
+## Batch 5A: Review, edit and version history
+
+Reused: the append-only `artifact_version` table and `ArtifactVersionService.append_version` (workspace lock + bounded retry on number conflicts), `StudyNoteArtifactService.save_edit` and `ManualStudyNoteContent` (extended, not duplicated), `EventDraftResult` validation (including DST checks), the existing version-list routes, `GET /api/screenshots/{id}/image` for opening the source, and the Batch 4B read-only archived drawer. No migration and no new model.
+
+| Route | Change | Responses |
+|---|---|---|
+| `POST /api/study-notes/{id}/edits` | now **requires** `baseVersionId` | 200 `{…version, fieldOrigins, editResult}`, 400/422, 404, 409 `version_conflict` (+ `currentVersionId`, `currentVersionNumber`) / `screenshot_archived`, 503 |
+| `POST /api/event-drafts/{id}/edits` (new, CSRF) | body `{baseVersionId, content: {all 9 editable fields, null = unknown}, uncertainFields}` | same as above; 400 `invalid_content` carries a safe `message` and `field` |
+| `GET /api/study-notes/{id}`, `GET /api/event-drafts/{id}` | add `fieldOrigins` | `{field: {origin, versionNumber}}` derived from history, or `null` when it cannot be established |
+
+Save semantics (under the workspace write lock, one transaction): base is current → insert one `manual_edit` version, unless identical to current (`editResult: "unchanged"`, nothing inserted). Base is stale → `409 version_conflict`, unless this exact edit produced the current version (`"replayed"`, nothing inserted). Validation failure, archived source, foreign/wrong-kind artifact or a base version from another artifact → nothing written. The service-level `save_edit` without a base is unchanged (design.md's concurrent Redo + Manual Edit guarantee).
+
+Calendar edit derivation (server): `missing_fields` = every applicable empty field (times and zone are not applicable to an all-day event); `uncertain_fields` = fields the user flags plus base-uncertain fields whose value the user did not change; `references` = the authoritative source row. The client never sends references, missing or uncertain lists.
+
+Frontend: `shell/draftHistory.ts` (`useDraftHistory`, save messages), `shell/DraftReviewParts.tsx` (version history, field-origin tags, source link, earlier-version banner), `shell/EventDraftEditor.tsx`, `shell/NotesDraftEditor.tsx`, wired into `CalendarDraft` and `MakeNotesDraft`. A ready draft reads its current version (GETs) so the summary reflects saved edits. The draft opens read-only; Edit appears only on the current version of an active screenshot; earlier versions are read-only with "Back to current version". The classic `StudyNoteView` now sends the version on screen as its base.
+
+### Batch 5A remediation
+
+- Replay needs lineage: a stale save is `replayed` only when the current version is a `manual_edit` numbered exactly `base + 1` with identical content (a base-checked save always inserts the version right after its base). Any other stale save is `409 version_conflict`, even when its content equals the current version.
+- Responses are built before commit, and any unexpected error rolls back, so a 503 from an edit route means nothing was saved. The UI still treats 5xx and lost responses as unknown: typed values stay, the message says the status could not be confirmed, and the button becomes "Save again", which is safe (an earlier success returns `replayed`).
+- Notes sources: the `source_reference` rows are authoritative; they must be distinct, owned by the workspace and equal the payload's `references` in order (multi-source notes keep their order). Reads and edits of inconsistent notes are the generic 503, with nothing appended or repaired.
+- Field provenance is `null` (unknown) unless the history is a complete chain 1..N of recognised origins (`ai_generate`, `ai_redo`, `manual_edit`) whose payloads all validate against the schema and the authoritative sources. A corrupt earlier version keeps the current version readable; that earlier version itself reads as 503. The UI shows an unrecognised origin as "origin unknown" / "origin not recorded" / "Source not recorded", never as AI or as you.
+- Editing starts by cancelling any pending history read, so a late response cannot replace the editor. The notes editor edits each list item and code block in its own field and sends untouched sections exactly as stored; only items added and left blank are dropped.

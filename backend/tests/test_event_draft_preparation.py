@@ -538,11 +538,11 @@ def test_no_calendar_delivery_route_exists(env):
     make_client, _, _ = env
     c = make_client()
     paths = c.get("/openapi.json").json()["paths"]
-    assert set(p for p in paths if "event-draft" in p) == {
-        "/api/event-drafts/{artifact_id}",
-        "/api/event-drafts/{artifact_id}/versions",
+    assert {p: sorted(paths[p]) for p in paths if "event-draft" in p} == {
+        "/api/event-drafts/{artifact_id}": ["get"],
+        "/api/event-drafts/{artifact_id}/versions": ["get"],
+        "/api/event-drafts/{artifact_id}/edits": ["post"],  # Batch 5A: internal manual edits only
     }
-    assert all(set(paths[p]) == {"get"} for p in paths if "event-draft" in p)
     assert not [p for p in paths if "calendar" in p.lower() or "oauth" in p.lower()]
 
 

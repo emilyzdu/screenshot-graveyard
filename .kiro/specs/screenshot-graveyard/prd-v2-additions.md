@@ -105,6 +105,41 @@ it before anything is put on a real calendar.
 8. Event draft preparation SHALL count toward the per-workspace AI quota and,
    until tasks.md 7.1 is closed, SHALL run only with the Fake provider.
 
+### Requirement 22: Review, edit and version history of drafts (P1, Batch 5A)
+**User Story:** As a solo user, I want to review a saved Notes or Calendar draft,
+correct it, and see every earlier version, so that nothing the AI wrote is
+mistaken for something I checked.
+1. THE System SHALL show a saved draft read-only first, with its current
+   version, its source screenshot and its version history; editing starts only
+   when the user chooses Edit.
+2. WHEN the user saves an edit, THE System SHALL append exactly one new
+   `manual_edit` version atomically, never modify an earlier version, and keep
+   the source references server-side (never accepted from the client).
+3. A save SHALL name the version it was based on. IF that version is no longer
+   current, THEN THE System SHALL refuse the save with a conflict and SHALL NOT
+   change the current version, except that an exact repeat of the save that
+   produced the current version returns that version without a new one. A save
+   identical to the current version SHALL create nothing.
+4. Calendar edits SHALL pass the full Requirement 21 validation (including
+   daylight-saving gaps and repeated hours). Unknown fields stay empty and
+   missing; nothing is defaulted. An unchanged AI value SHALL keep its
+   uncertainty; the user can add uncertainty to any value.
+5. Field provenance SHALL be derived from the version history (the version that
+   last changed each field). An unchanged AI field SHALL NOT be shown as checked
+   by the user. If the history cannot be read, THE System SHALL say provenance
+   is unknown.
+6. Drafts of an archived screenshot SHALL stay readable (all versions) but SHALL
+   NOT be editable until the screenshot is resurrected.
+7. Editing SHALL NOT call an AI adapter or write to any external application.
+
+**Design note (refinement, not a replacement):** design.md's "Concurrent Redo /
+Manual Edit" guarantee (both commit, via bounded retry) is unchanged at the
+service layer: `save_edit` without a base version and AI Redo are not
+base-checked. Requirement 22.3 adds optimistic concurrency only at the user
+edit boundary (the HTTP edit routes, which always send `baseVersionId`), so a
+user save based on a version that a Redo or another tab has since replaced is
+refused rather than silently replacing it as current.
+
 ### Open conflict: external destination for a future calendar delivery
 Requirement 21 adds no external write. A later Google Calendar delivery
 (planned as "Batch 6") would conflict with existing requirements that are NOT
@@ -165,6 +200,13 @@ refer to existing task numbers where relevant.
   - **Requirements:** 21.1 to 21.8, INV-1, INV-4 to INV-7
   - **Acceptance test:** backend router and schema tests (idempotency, two-connection concurrency and archive race, consent at each boundary, cross-workspace 404, quota, provider fail-closed, no network), a property test that accepted drafts declare every unknown and invent nothing, frontend tests for states, reload, retry gating and stale handlers, and an isolated browser run with Fake AI.
   - **Priority:** P1
+- [ ] A.9 `[P1]` Review, edit and version history for Notes and Calendar drafts (Batch 5A)
+  - `POST /api/event-drafts/{id}/edits` (new) and `POST /api/study-notes/{id}/edits` (now requires `baseVersionId`), field provenance derived from history on every version read, archived drafts read-only. Gothic review/edit UI with version history. No migration, no approval, no external write.
+  - **Dependencies:** A.8, 2.8, 3.1
+  - **Requirements:** 22.1 to 22.7, INV-5 to INV-7
+  - **Acceptance test:** backend tests for new versions, ordered history, stale-base conflicts on two real SQLite connections, replay/unchanged, validation and DST, provenance, cross-workspace and wrong-kind, archived refusal, no AI or network; frontend tests for read-only first, edit/save/cancel, conflicts, validation, provenance and archived read-only; an isolated browser run with Fake AI.
+  - **Priority:** P1
+
 ## Dependency-aware plan
 
 ```
@@ -182,7 +224,8 @@ Wave 5 (A.5). A.7 starts only after the PRD is re-supplied and A.4 is stable.
 | Consent gate, reversible versions, Crypt, Markdown export | Implemented (earlier tasks) |
 | A.1 to A.5 | Planned |
 | A.7 intent inference and tool planning | Planned, deferred, not implemented |
-| A.8 calendar event draft (internal draft only) | Implemented in Batch 4B, pending review |
+| A.8 calendar event draft (internal draft only) | Implemented in Batch 4B |
+| A.9 review, edit and version history | Implemented in Batch 5A, pending review |
 
 ## Addendum: updates after reading the real PRD v2.0
 

@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   getEventDraft,
   getEventDraftPreparation,
+  listEventDraftVersions,
   requestEventDraft,
   type EventDraftField,
   type EventDraftVersion,
@@ -12,9 +13,15 @@ import type { Screenshot } from '../api/client';
 import { DEFAULT_MAX_POLLS, DEFAULT_POLL_INTERVAL_MS } from '../ai/useOperationPolling';
 import { Icon } from '../ui/Icon';
 import { Badge, Button } from '../ui/primitives';
-import { describeFailure, draftProvenance, usePreparation, type DraftPresence } from './usePreparation';
+import { EarlierVersionBanner, FieldHistoryNotice, FieldOriginTag, SourceLink, VersionHistory } from './DraftReviewParts';
+import { describeSaved, originLabel, useDraftHistory, type SaveOutcomeText } from './draftHistory';
+import { EventDraftEditor } from './EventDraftEditor';
+import { DRAFT_REQUEST_TIMEOUT_MS, describeFailure, draftProvenance, usePreparation, type DraftPresence } from './usePreparation';
+import { boundedFetch } from '../api/boundedFetch';
 
-type DraftView = { t: 'closed' } | { t: 'loading' } | { t: 'error' } | { t: 'open'; draft: EventDraftVersion };
+const loadEventVersion = (artifactId: number, versionId: number | undefined, f: typeof fetch) =>
+  versionId === undefined ? getEventDraft(artifactId, f) : getEventDraft(artifactId, f, versionId);
+const hasMissing = (d: EventDraftVersion) => d.content.missingFields.length > 0;
 
 interface Props {
   screenshot: Screenshot;
@@ -60,20 +67,39 @@ export function CalendarDraft({
     maxPolls,
     onPresence,
   });
-  const [view, setView] = useState<DraftView>({ t: 'closed' });
+  const history = useDraftHistory<EventDraftVersion>({
+    screenshotId: id,
+    loadVersion: loadEventVersion,
+    listVersions: listEventDraftVersions,
+    read,
+    signal,
+  });
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [notice, setNotice] = useState<SaveOutcomeText | null>(null);
+  const request = () => boundedFetch(DRAFT_REQUEST_TIMEOUT_MS, signal());
 
-  const onOpenDraft = async (artifactId: number) => {
-    const lifetime = signal();
-    setView({ t: 'loading' });
-    const res = await getEventDraft(artifactId, read());
-    if (lifetime.aborted) return;
-    // Only show a draft that belongs to this screenshot.
-    if (res.ok && res.data.artifactId === artifactId && res.data.sourceScreenshotIds.includes(id)) {
-      setView({ t: 'open', draft: res.data });
-    } else {
-      setView({ t: 'error' });
-    }
+  // Once a draft is ready, read its CURRENT version (GETs only) so the summary
+  // reflects saved edits, not just the original preparation. The body stays
+  // hidden until the user opens it.
+  const readyArtifact = state.t === 'ready' ? state.prep.artifactId : null;
+  const openRef = useRef(history.open);
+  useLayoutEffect(() => {
+    openRef.current = history.open;
+  });
+  useEffect(() => {
+    if (readyArtifact !== null) void openRef.current(readyArtifact);
+  }, [readyArtifact]);
+
+  const onOpenDraft = (artifactId: number) => {
+    setExpanded(true);
+    if (history.state.t !== 'open') void history.open(artifactId);
   };
+  const h = history.state;
+  const loaded = h.t === 'open' ? h : null;
+  // "Needs details" = information is missing. Uncertain values are named separately.
+  const needsDetails = loaded ? hasMissing(loaded.current) : state.t === 'ready' && state.prep.status === 'uncertain';
+  const hasUncertain = loaded !== null && loaded.current.content.uncertainFields.length > 0;
 
   if (state.t === 'checking') {
     return <p className="sg-muted" role="status">Checking for a calendar event draft…</p>;
@@ -152,33 +178,79 @@ export function CalendarDraft({
         <div className="sg-draft__ready" role="status">
           <p>
             <Badge tone="green">Draft ready</Badge>{' '}
-            {state.prep.status === 'uncertain' && <Badge tone="peach">Needs details</Badge>}{' '}
-            <Badge tone={draftProvenance(state.prep, view.t === 'open' ? view.draft.origin : null).tone}>
-              {draftProvenance(state.prep, view.t === 'open' ? view.draft.origin : null).badge}
+            {needsDetails && <Badge tone="peach">Needs details</Badge>}{' '}
+            <Badge tone={draftProvenance(state.prep, loaded ? loaded.current.origin : null).tone}>
+              {draftProvenance(state.prep, loaded ? loaded.current.origin : null).badge}
             </Badge>
           </p>
           <p className="sg-muted">
-            Saved in your workspace as draft #{state.prep.artifactId}. Not added to Google Calendar or any other
+            Saved in your workspace as draft #{state.prep.artifactId}
+            {loaded && `, version ${loaded.current.versionNumber}`}. Not added to Google Calendar or any other
             calendar, and not sent anywhere.
-            {state.prep.status === 'uncertain' && ' Some details are missing or uncertain.'}
+            {needsDetails && (loaded ? ' Some details are missing.' : ' Some details are missing or uncertain.')}
+            {hasUncertain && ' Some values are marked uncertain; check them before relying on this draft.'}
           </p>
-          {view.t === 'open' ? (
-            <Button size="sm" onClick={() => setView({ t: 'closed' })}>Hide draft</Button>
+          {notice && <p role={notice.kind === 'error' ? 'alert' : 'status'}>{notice.text}</p>}
+          {expanded && loaded ? (
+            <Button size="sm" disabled={editing} onClick={() => { history.resetToCurrent(); setExpanded(false); }}>Hide draft</Button>
           ) : (
-            <Button size="sm" disabled={view.t === 'loading'} onClick={() => void onOpenDraft(state.prep.artifactId!)}>
-              {view.t === 'loading' ? 'Opening…' : 'Open draft'}
+            <Button size="sm" disabled={expanded && h.t === 'loading'} onClick={() => onOpenDraft(state.prep.artifactId!)}>
+              {expanded && h.t === 'loading' ? 'Opening…' : 'Open draft'}
             </Button>
           )}
-          {view.t === 'error' && <p role="alert">The draft could not be loaded. Try opening it again.</p>}
-          {view.t === 'open' && <EventDraftBody draft={view.draft} prep={state.prep} screenshotId={id} />}
+          {expanded && h.t === 'error' && <p role="alert">The draft could not be loaded. Try opening it again.</p>}
+          {expanded && loaded && (
+            <div className="sg-review">
+              {loaded.shown.versionId !== loaded.current.versionId && (
+                <EarlierVersionBanner versionNumber={loaded.shown.versionNumber} onBack={() => void history.show(loaded.current.versionId)} />
+              )}
+              {editing && loaded.shown.versionId === loaded.current.versionId ? (
+                <EventDraftEditor
+                  checkLatest={() => history.peekCurrent(loaded.current.artifactId)}
+                  provider={state.prep.provider}
+                  draft={loaded.current}
+                  request={request}
+                  onCancel={() => setEditing(false)}
+                  onSaved={(saved) => {
+                    setEditing(false);
+                    setNotice(describeSaved(saved.editResult, saved.versionNumber));
+                    void history.adopt(saved);
+                  }}
+                  onLoadLatest={() => {
+                    setEditing(false);
+                    setNotice({ kind: 'info', text: 'Loaded the latest version. Your unsaved changes were discarded.' });
+                    void history.open(loaded.current.artifactId);
+                  }}
+                />
+              ) : (
+                <>
+                  <EventDraftBody draft={loaded.shown} prep={state.prep} screenshotId={id} />
+                  {!readOnly && loaded.shown.versionId === loaded.current.versionId && (
+                    <Button size="sm" onClick={() => { history.cancelPending(); setNotice(null); setEditing(true); }}>Edit draft</Button>
+                  )}
+                </>
+              )}
+              <VersionHistory
+                versions={loaded.versions}
+                shownId={loaded.shown.versionId}
+                provider={state.prep.provider}
+                disabled={editing}
+                onShow={(versionId) => void history.show(versionId)}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-/** A value exactly as the server stored it, or an explicit Missing / Not set marker. Never a guess. */
-function Field({ draft, field, value }: { draft: EventDraftVersion; field: EventDraftField; value: string | null }) {
+/**
+ * A value exactly as the server stored it, or an explicit Missing / Not set
+ * marker; never a guess. Its origin tag says whether you entered it or the AI
+ * did (an AI value is never shown as checked by you).
+ */
+function Field({ draft, field, value, provider }: { draft: EventDraftVersion; field: EventDraftField; value: string | null; provider: string | null }) {
   const c = draft.content;
   if (c.missingFields.includes(field)) return <Badge tone="muted">Missing</Badge>;
   if (value === null) return <span className="sg-muted">Not set</span>;
@@ -190,55 +262,58 @@ function Field({ draft, field, value }: { draft: EventDraftVersion; field: Event
           {' '}
           <Badge tone="peach">Uncertain</Badge>
         </>
-      )}
+      )}{' '}
+      <FieldOriginTag origins={draft.fieldOrigins} field={field} provider={provider} />
     </>
   );
 }
 
 function EventDraftBody({ draft, prep, screenshotId }: { draft: EventDraftVersion; prep: Preparation; screenshotId: number }) {
   const c = draft.content;
-  const simulated = prep.provider === 'fake' && draft.origin !== 'manual_edit';
-  const origin =
-    draft.origin === 'manual_edit' ? 'edited by you' : draft.origin === 'ai_redo' ? 'regenerated by AI' : 'generated by AI';
+  const provider = prep.provider;
+  // Any field the Fake AI wrote and you have not changed is still simulated.
+  const simulatedFields = provider === 'fake' && Object.values(draft.fieldOrigins ?? {}).some((o) => o.origin === 'ai_generate' || o.origin === 'ai_redo');
+  const aiVersion = draft.origin === 'ai_generate' || draft.origin === 'ai_redo';
+  const simulated = provider === 'fake' && (aiVersion || simulatedFields);
   const allDay = c.allDay === null ? null : c.allDay ? 'Yes' : 'No';
+  const rows: [string, EventDraftField, string | null][] = [
+    ['Title', 'title', c.title],
+    ['Start date', 'start_date', c.startDate],
+    ['Start time', 'start_time', c.startTime],
+    ['End date', 'end_date', c.endDate],
+    ['End time', 'end_time', c.endTime],
+    ['All day', 'all_day', allDay],
+    ['Time zone', 'time_zone', c.timeZone],
+    ['Location', 'location', c.location],
+    ['Description', 'description', c.description],
+  ];
   return (
     <article className="sg-draft__body" aria-label={`Event draft: ${c.title ?? 'untitled'}`}>
       {simulated && (
         <p className="sg-draft__simulated" role="note">
-          Simulated draft: the Fake AI did not read your screenshot. No date, time, time zone or location was
-          extracted from the image.
+          {!aiVersion
+            ? 'Simulated draft: values marked "Fake AI" were written by the Fake AI without reading your screenshot. Only values marked "edited by you" came from you.'
+            : 'Simulated draft: the Fake AI did not read your screenshot. No date, time, time zone or location was extracted from the image.'}
         </p>
       )}
+      <FieldHistoryNotice origins={draft.fieldOrigins} />
       <dl className="sg-facts">
-        <dt>Title</dt>
-        <dd><Field draft={draft} field="title" value={c.title} /></dd>
-        <dt>Start date</dt>
-        <dd><Field draft={draft} field="start_date" value={c.startDate} /></dd>
-        <dt>Start time</dt>
-        <dd><Field draft={draft} field="start_time" value={c.startTime} /></dd>
-        <dt>End date</dt>
-        <dd><Field draft={draft} field="end_date" value={c.endDate} /></dd>
-        <dt>End time</dt>
-        <dd><Field draft={draft} field="end_time" value={c.endTime} /></dd>
-        <dt>All day</dt>
-        <dd><Field draft={draft} field="all_day" value={allDay} /></dd>
-        <dt>Time zone</dt>
-        <dd><Field draft={draft} field="time_zone" value={c.timeZone} /></dd>
-        <dt>Location</dt>
-        <dd><Field draft={draft} field="location" value={c.location} /></dd>
-        <dt>Description</dt>
-        <dd><Field draft={draft} field="description" value={c.description} /></dd>
+        {rows.map(([label, field, value]) => (
+          <div key={field} className="sg-facts__pair">
+            <dt>{label}</dt>
+            <dd><Field draft={draft} field={field} value={value} provider={provider} /></dd>
+          </div>
+        ))}
         <dt>Source</dt>
-        <dd>Screenshot #{screenshotId}</dd>
+        <dd>Screenshot #{screenshotId} <SourceLink screenshotId={screenshotId} /></dd>
         <dt>Version</dt>
         <dd>
-          Version {draft.versionNumber}, {origin}
-          {simulated ? ' (Fake AI, simulated)' : ''}.
+          Version {draft.versionNumber}, {originLabel(draft.origin, provider)}.
         </dd>
       </dl>
       <p className="sg-muted">
-        Times are shown exactly as saved, in the listed time zone. Review, editing and approval come in a later
-        version. Nothing has been added to a calendar.
+        Times are shown exactly as saved, in the listed time zone. Approval comes in a later version. Nothing has been
+        added to a calendar.
       </p>
     </article>
   );

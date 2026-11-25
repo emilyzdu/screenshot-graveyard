@@ -295,7 +295,8 @@ def test_study_note_list_and_versions_are_workspace_scoped(client):
     notes = c.get("/api/study-notes").json()["notes"]
     assert len(notes) == 1 and notes[0]["sourceScreenshotIds"] == ids
     aid = notes[0]["artifactId"]
-    c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"content": {"topic": "Edited"}})
+    base = c.get(f"/api/study-notes/{aid}").json()["versionId"]
+    c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"baseVersionId": base, "content": {"topic": "Edited"}})
     versions = c.get(f"/api/study-notes/{aid}/versions").json()["versions"]
     assert [(v["versionNumber"], v["origin"], v["isCurrent"]) for v in versions] == [
         (1, "ai_generate", False), (2, "manual_edit", True)]

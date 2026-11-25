@@ -132,7 +132,8 @@ def _versions(eng, kind):
 def test_note_redo_202_polls_to_successful_and_keeps_the_manual_edit(client):
     c, eng, ad = client
     aid, ids = _note(c)
-    c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"content": {"topic": "My edit"}})
+    base = c.get(f"/api/study-notes/{aid}").json()["versionId"]
+    c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"baseVersionId": base, "content": {"topic": "My edit"}})
     r = _redo_note(c, aid, {"instructions": "focus on pitfalls"})
     assert r.status_code == 202
     body = r.json()

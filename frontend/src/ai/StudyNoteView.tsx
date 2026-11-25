@@ -83,7 +83,7 @@ export function StudyNoteView({ artifactId, onVersionsChanged }: Props) {
   };
 
   const onSave = async () => {
-    if (!draft || savingRef.current) return; // duplicate-click prevention
+    if (!draft || !shown || savingRef.current) return; // duplicate-click prevention
     savingRef.current = true;
     setSaving(true);
     try {
@@ -96,7 +96,8 @@ export function StudyNoteView({ artifactId, onVersionsChanged }: Props) {
         pitfalls: toLines(draft.pitfalls),
         uncertain_content: toLines(draft.uncertain),
       };
-      const res = await saveStudyNoteEdit(artifactId, content);
+      // The version on screen is the base: a newer save elsewhere is a conflict, not an overwrite.
+      const res = await saveStudyNoteEdit(artifactId, content, shown.versionId);
       if (!res.ok) {
         setMessage({ kind: 'error', text: describeRequestFailure(res) });
         return;

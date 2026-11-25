@@ -35,6 +35,9 @@ vi.mock('./api/ai', () => ({
   requestMakeNotesDraft: vi.fn(),
   getEventDraftPreparation: () => Promise.resolve({ ok: false, status: 404, code: 'no_preparation', message: 'No preparation yet' }),
   requestEventDraft: vi.fn(),
+  // Batch 5A: version history and edits (inert unless a test configures them).
+  listEventDraftVersions: vi.fn(),
+  saveEventDraftEdit: vi.fn(),
   getEventDraft: vi.fn(),
   CATEGORIES: [],
 }));

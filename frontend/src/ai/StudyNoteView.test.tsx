@@ -89,7 +89,7 @@ describe('StudyNoteView', () => {
     expect(m.saveStudyNoteEdit).toHaveBeenCalledWith(40, {
       topic: 'New topic', main_concepts: ['a', 'b'], extracted_code: [CODE],
       code_explanations: ['Returns x.'], pitfalls: ['Missing type.'], uncertain_content: ['Could not read line 4'],
-    });
+    }, 102); // Batch 5A: the version being edited is sent as the base
     expect(await screen.findByText(/Saved as version 3.*Earlier versions are kept/i)).toBeInTheDocument();
   });
 

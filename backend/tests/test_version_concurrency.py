@@ -999,13 +999,14 @@ SAFE_503 = {"error": {"code": "service_unavailable", "message": "Service tempora
 def test_http_note_edit_reports_a_generic_503_when_retries_are_exhausted(http, monkeypatch):
     c, eng, _ = http
     aid, _ = _http_note(c)
+    base = c.get(f"/api/study-notes/{aid}").json()["versionId"]
     with stale_max(monkeypatch, [aid], times=10**6):
-        r = c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"content": {"topic": "PRIVATE-TOPIC"}})
+        r = c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"baseVersionId": base, "content": {"topic": "PRIVATE-TOPIC"}})
     assert r.status_code == 503 and r.json() == SAFE_503
     assert "PRIVATE-TOPIC" not in r.text and "UNIQUE" not in r.text
     versions_now = c.get(f"/api/study-notes/{aid}/versions").json()["versions"]
     assert [(v["versionNumber"], v["isCurrent"]) for v in versions_now] == [(1, True)]
-    ok = c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"content": {"topic": "After"}})
+    ok = c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"baseVersionId": base, "content": {"topic": "After"}})
     assert ok.status_code == 200 and ok.json()["versionNumber"] == 2        # service recovered
 
 

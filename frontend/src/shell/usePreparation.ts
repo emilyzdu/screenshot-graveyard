@@ -58,6 +58,10 @@ export function describeFailure(detail: string | null): string {
  * preparation's durable key and the version's origin), never the current mode.
  */
 export function draftProvenance(prep: Preparation, origin: string | null) {
+  // An origin the server does not record is not guessed at (Batch 5A).
+  if (origin !== null && origin !== 'ai_generate' && origin !== 'ai_redo' && origin !== 'manual_edit') {
+    return { badge: 'Source not recorded', tone: 'muted' as const };
+  }
   const edited = origin === 'manual_edit';
   if (prep.provider === 'fake') {
     return edited

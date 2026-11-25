@@ -97,8 +97,8 @@ describe('AI API client', () => {
   it('sends study-note edits as JSON content and builds export URLs', async () => {
     const f = fetchOf(() => json({}, 400));
     const content = { topic: 'T', main_concepts: [], extracted_code: ['a\n\tb'], code_explanations: [], pitfalls: [], uncertain_content: [] };
-    await saveStudyNoteEdit(7, content, f);
-    expect(JSON.parse((f as ReturnType<typeof vi.fn>).mock.calls[0][1].body)).toEqual({ content });
+    await saveStudyNoteEdit(7, content, 31, f);
+    expect(JSON.parse((f as ReturnType<typeof vi.fn>).mock.calls[0][1].body)).toEqual({ baseVersionId: 31, content });
     expect(studyNoteExportUrl(7)).toBe('/api/study-notes/7/export');
     expect(studyNoteExportUrl(7, 12)).toBe('/api/study-notes/7/export?versionId=12');
   });

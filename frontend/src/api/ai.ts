@@ -15,6 +15,8 @@ export interface ApiFailure {
   status: number;
   code: string;
   message: string;
+  /** For a 400 on an edit: the field the server's validation is about (safe to show). */
+  field?: string;
 }
 export type ApiResult<T> = { ok: true; data: T } | ApiFailure;
 
@@ -68,6 +70,9 @@ export interface StudyNoteContent {
   pitfalls: string[];
   uncertain_content: string[];
 }
+/** Per field: the origin and version number of the version that last changed it. */
+export type FieldOrigins = Record<string, { origin: string; versionNumber: number }>;
+
 export interface StudyNoteVersion {
   artifactId: number;
   versionId: number;
@@ -75,7 +80,12 @@ export interface StudyNoteVersion {
   origin: string;
   content: StudyNoteContent & { references: number[] };
   sourceScreenshotIds: number[];
+  /** Derived by the server from the version history; null = could not be established. */
+  fieldOrigins?: FieldOrigins | null;
 }
+
+/** What an edit save did: a new version, an already-saved replay, or nothing to save. */
+export type EditResult = 'created' | 'replayed' | 'unchanged';
 export interface StudyNoteSummary {
   artifactId: number;
   versionNumber: number;
@@ -138,6 +148,7 @@ async function call<T>(
       status: response.status,
       code: typeof err.code === 'string' ? err.code : `http_${response.status}`,
       message: typeof err.message === 'string' ? err.message : `HTTP ${response.status}`,
+      ...(typeof err.field === 'string' ? { field: err.field } : {}),
     };
   }
   const data = parse(parsed);
@@ -238,7 +249,23 @@ function parseNoteVersion(b: unknown): StudyNoteVersion | null {
     origin: b.origin,
     content,
     sourceScreenshotIds: b.sourceScreenshotIds,
+    ...(b.fieldOrigins !== undefined ? { fieldOrigins: parseFieldOrigins(b.fieldOrigins) } : {}),
   };
+}
+
+function parseFieldOrigins(v: unknown): FieldOrigins | null {
+  if (!isObj(v)) return null;
+  const out: FieldOrigins = {};
+  for (const [k, o] of Object.entries(v)) {
+    if (!isObj(o) || typeof o.origin !== 'string' || typeof o.versionNumber !== 'number') return null;
+    out[k] = { origin: o.origin, versionNumber: o.versionNumber };
+  }
+  return out;
+}
+
+function parseEditResult(b: unknown): EditResult | null {
+  if (!isObj(b)) return null;
+  return b.editResult === 'created' || b.editResult === 'replayed' || b.editResult === 'unchanged' ? b.editResult : null;
 }
 
 // ------------------------------------------------------------------ consent
@@ -426,6 +453,20 @@ export interface EventDraftVersion {
   origin: string;
   sourceScreenshotIds: number[];
   content: EventDraftContent;
+  fieldOrigins?: FieldOrigins | null;
+}
+
+/** The editable event fields (wire names). `null` = unknown; every key is always sent. */
+export interface EventDraftEdit {
+  title: string | null;
+  start_date: string | null;
+  start_time: string | null;
+  end_date: string | null;
+  end_time: string | null;
+  all_day: boolean | null;
+  time_zone: string | null;
+  location: string | null;
+  description: string | null;
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -472,6 +513,7 @@ function parseEventDraft(b: unknown): EventDraftVersion | null {
     versionNumber: b.versionNumber,
     origin: b.origin,
     sourceScreenshotIds: b.sourceScreenshotIds,
+    ...(b.fieldOrigins !== undefined ? { fieldOrigins: parseFieldOrigins(b.fieldOrigins) } : {}),
     content: {
       title: c.title,
       startDate: c.start_date,
@@ -490,8 +532,51 @@ function parseEventDraft(b: unknown): EventDraftVersion | null {
 }
 
 /** Read one persisted event draft (current version by default). Read-only. */
-export function getEventDraft(artifactId: number, f: Fetch = fetch) {
-  return call(`/api/event-drafts/${artifactId}`, {}, parseEventDraft, f);
+export function getEventDraft(artifactId: number, f: Fetch = fetch, versionId?: number) {
+  const q = versionId === undefined ? '' : `?versionId=${versionId}`;
+  return call(`/api/event-drafts/${artifactId}${q}`, {}, parseEventDraft, f);
+}
+
+function parseVersionList(b: unknown): VersionInfo[] | null {
+  if (!isObj(b) || !Array.isArray(b.versions)) return null;
+  const out: VersionInfo[] = [];
+  for (const v of b.versions) {
+    if (!isObj(v) || typeof v.versionId !== 'number' || typeof v.versionNumber !== 'number' ||
+        typeof v.origin !== 'string' || typeof v.isCurrent !== 'boolean') {
+      return null;
+    }
+    out.push({ versionId: v.versionId, versionNumber: v.versionNumber, origin: v.origin, isCurrent: v.isCurrent });
+  }
+  return out;
+}
+
+/** All retained versions of an event draft, oldest first. Read-only. */
+export function listEventDraftVersions(artifactId: number, f: Fetch = fetch) {
+  return call(`/api/event-drafts/${artifactId}/versions`, {}, parseVersionList, f);
+}
+
+/**
+ * Save a manual edit of an event draft as a new version (Batch 5A). The server
+ * derives missing/uncertain fields; `uncertainFields` only lists the fields the
+ * user explicitly flags. A stale `baseVersionId` is a 409 `version_conflict`.
+ */
+export function saveEventDraftEdit(
+  artifactId: number,
+  baseVersionId: number,
+  content: EventDraftEdit,
+  uncertainFields: EventDraftField[],
+  f: Fetch = fetch,
+) {
+  return call(
+    `/api/event-drafts/${artifactId}/edits`,
+    { method: 'POST', json: { baseVersionId, content, uncertainFields } },
+    (b) => {
+      const version = parseEventDraft(b);
+      const result = parseEditResult(b);
+      return version && result ? { ...version, editResult: result } : null;
+    },
+    f,
+  );
 }
 
 export function getStudyNote(artifactId: number, versionId?: number, f: Fetch = fetch) {
@@ -527,11 +612,19 @@ export function listStudyNoteVersions(artifactId: number, f: Fetch = fetch) {
     f,
   );
 }
-export function saveStudyNoteEdit(artifactId: number, content: StudyNoteContent, f: Fetch = fetch) {
+/**
+ * Save a manual edit as a new version. `baseVersionId` is the version being
+ * edited: a stale base is a 409 `version_conflict` and nothing is saved.
+ */
+export function saveStudyNoteEdit(artifactId: number, content: StudyNoteContent, baseVersionId: number, f: Fetch = fetch) {
   return call(
     `/api/study-notes/${artifactId}/edits`,
-    { method: 'POST', json: { content } },
-    parseNoteVersion,
+    { method: 'POST', json: { baseVersionId, content } },
+    (b) => {
+      const version = parseNoteVersion(b);
+      const result = parseEditResult(b);
+      return version && result ? { ...version, editResult: result } : null;
+    },
     f,
   );
 }
