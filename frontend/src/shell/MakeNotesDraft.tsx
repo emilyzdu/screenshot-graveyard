@@ -13,6 +13,8 @@ import { DEFAULT_MAX_POLLS, DEFAULT_POLL_INTERVAL_MS } from '../ai/useOperationP
 import { Icon } from '../ui/Icon';
 import { Badge, Button } from '../ui/primitives';
 import { boundedFetch } from '../api/boundedFetch';
+import { ApprovalSection } from './ApprovalSection';
+import { useApprovalAttempts } from './approvalAttempts';
 import { EarlierVersionBanner, FieldHistoryNotice, FieldOriginTag, SourceLink, VersionHistory } from './DraftReviewParts';
 import { describeSaved, originLabel, useDraftHistory, type SaveOutcomeText } from './draftHistory';
 import { NotesDraftEditor } from './NotesDraftEditor';
@@ -83,6 +85,8 @@ export function MakeNotesDraft({
   // summary reflects saved edits; the body stays hidden until it is opened.
   const readyArtifact = state.t === 'ready' ? state.prep.artifactId : null;
   const openRef = useRef(history.open);
+  // Approval attempts outlive the approval section (Hide draft, edit, new version).
+  const approvalAttempts = useApprovalAttempts();
   useLayoutEffect(() => {
     openRef.current = history.open;
   });
@@ -183,7 +187,7 @@ export function MakeNotesDraft({
           </p>
           <p className="sg-muted">
             Saved in your workspace as draft #{state.prep.artifactId}
-            {loaded && `, version ${loaded.current.versionNumber}`}. Not approved, not exported and not sent anywhere.
+            {loaded && `, version ${loaded.current.versionNumber}`}. Not exported and not sent anywhere.
             {uncertain && ' Parts of it are marked uncertain.'}
           </p>
           {notice && <p role={notice.kind === 'error' ? 'alert' : 'status'}>{notice.text}</p>}
@@ -233,6 +237,19 @@ export function MakeNotesDraft({
                 disabled={editing}
                 onShow={(versionId) => void history.show(versionId)}
               />
+              {!editing && (
+                <ApprovalSection
+                  key={`approval-${loaded.current.versionId}`}
+                  artifactId={loaded.current.artifactId}
+                  shown={loaded.shown}
+                  current={loaded.current}
+                  provider={state.prep.provider}
+                  readOnly={readOnly}
+                  request={request}
+                  onLoadLatest={() => void history.open(loaded.current.artifactId)}
+                  attempts={approvalAttempts}
+                />
+              )}
             </div>
           )}
         </div>
@@ -305,7 +322,7 @@ function DraftBody({ note, prep, screenshotId }: { note: StudyNoteVersion; prep:
           Version {note.versionNumber}, {originLabel(note.origin, provider)}.
         </dd>
       </dl>
-      <p className="sg-muted">Approval comes in a later version. This draft is not exported and not sent anywhere.</p>
+      <p className="sg-muted">Approval status is shown below. This draft is not exported and not sent anywhere.</p>
     </article>
   );
 }

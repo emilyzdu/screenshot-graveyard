@@ -403,6 +403,78 @@ class WorkspaceRepository:
         ).order_by(models.SourceReference.id)
         return list(self._session.scalars(stmt))
 
+    # ---------------------------------- approval ---------------------------------
+
+    def get_artifact_locked(self, artifact_id: int) -> models.Artifact | None:
+        """Fresh, workspace-scoped artifact read for a locked section.
+
+        Call only after `lock_workspace()`. `populate_existing` replaces any
+        cached `current_version_id`, so the current-version check sees every
+        earlier commit (same reasoning as `get_screenshot_locked`).
+        """
+        stmt = (
+            select(models.Artifact)
+            .where(models.Artifact.id == artifact_id, models.Artifact.workspace_id == self._workspace_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return self._session.scalars(stmt).one_or_none()
+
+    def read_current_version_id(self, artifact_id: int) -> int | None:
+        """The committed current-version pointer of an OWNED artifact, read fresh.
+
+        A column-only SELECT never comes from the ORM identity map, so each call
+        observes the database as of that statement.
+        """
+        stmt = select(models.Artifact.current_version_id).where(
+            models.Artifact.id == artifact_id, models.Artifact.workspace_id == self._workspace_id
+        )
+        return self._session.execute(stmt).scalar_one_or_none()
+
+    def get_approval_for_version(self, version_id: int) -> models.Approval | None:
+        stmt = select(models.Approval).where(
+            models.Approval.workspace_id == self._workspace_id,
+            models.Approval.artifact_version_id == version_id,
+        )
+        return self._session.scalars(stmt).one_or_none()
+
+    def list_approvals(self, artifact_id: int) -> list[models.Approval]:
+        """Every approval of an OWNED artifact, oldest first."""
+        self._require_owned(models.Artifact, artifact_id)
+        stmt = select(models.Approval).where(
+            models.Approval.workspace_id == self._workspace_id,
+            models.Approval.artifact_id == artifact_id,
+        ).order_by(models.Approval.id)
+        return list(self._session.scalars(stmt))
+
+    def add_approval(
+        self,
+        *,
+        artifact_id: int,
+        artifact_version_id: int,
+        version_number: int,
+        content_sha256: str,
+        acknowledged_uncertain_json: str,
+        ai_origin_fields_json: str,
+    ) -> models.Approval:
+        """INSERT one approval. The version must belong to an owned artifact."""
+        self._require_owned(models.Artifact, artifact_id)
+        version = self._require_owned(models.ArtifactVersion, artifact_version_id)
+        if version.artifact_id != artifact_id:
+            raise CrossWorkspaceError()
+        approval = models.Approval(
+            workspace_id=self._workspace_id,
+            artifact_id=artifact_id,
+            artifact_version_id=artifact_version_id,
+            version_number=version_number,
+            content_sha256=content_sha256,
+            acknowledged_uncertain_json=acknowledged_uncertain_json,
+            ai_origin_fields_json=ai_origin_fields_json,
+        )
+        self._session.add(approval)
+        self._session.flush()
+        return approval
+
     # ----------------------------- consent_record ----------------------------
 
     def set_consent(

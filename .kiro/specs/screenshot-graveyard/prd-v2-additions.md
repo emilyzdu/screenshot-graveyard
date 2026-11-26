@@ -140,6 +140,36 @@ edit boundary (the HTTP edit routes, which always send `baseVersionId`), so a
 user save based on a version that a Redo or another tab has since replaced is
 refused rather than silently replacing it as current.
 
+### Requirement 23: Version-specific approval and approval ledger (P1, Batch 5B)
+**User Story:** As a solo user, I want to explicitly approve one saved version
+of a Notes or Calendar draft after reviewing it, so that a later step can rely
+on exactly what I approved, and nothing I did not approve.
+1. THE System SHALL record an approval as an INSERT-only ledger entry binding
+   the workspace (the only actor identity; there are no user accounts), the
+   artifact, the exact immutable version id, its version number, the SHA-256
+   of that version's stored content, the acknowledged uncertain fields, the
+   unchanged AI-origin fields, and the approval time.
+2. THE System SHALL approve only the CURRENT version, re-checked under the
+   workspace write lock. A request for any other version SHALL be a version
+   conflict, except that a version that is already approved returns its
+   existing record without writing.
+3. Approval SHALL require the user's explicit confirmation that they reviewed
+   the version, and an explicit acknowledgement of every uncertain field
+   (Calendar) or of a non-empty Uncertain section (Notes).
+4. A Calendar draft SHALL be approvable only when it has a title, start and
+   end dates and a known all-day value, and, if timed, start and end times and
+   an IANA time zone (DST validation from Requirement 21 still applies).
+   Nothing SHALL be filled in for the user.
+5. THE System SHALL NOT approve a version whose source references, schema or
+   edit history cannot be verified, nor while a source screenshot is archived.
+6. Approving SHALL NOT change, replace or add a version, call an AI adapter,
+   export, or write to any external application. Approval is not delivery.
+7. A newer version SHALL NOT inherit an older version's approval. Earlier
+   approvals remain in the ledger and are shown as earlier approvals.
+8. Repeated and concurrent approvals of one version SHALL produce exactly one
+   record. Every approval claim in the UI SHALL come from the server's ledger;
+   an unknown outcome SHALL be reported as unknown, with a read-only check.
+
 ### Open conflict: external destination for a future calendar delivery
 Requirement 21 adds no external write. A later Google Calendar delivery
 (planned as "Batch 6") would conflict with existing requirements that are NOT
@@ -207,6 +237,13 @@ refer to existing task numbers where relevant.
   - **Acceptance test:** backend tests for new versions, ordered history, stale-base conflicts on two real SQLite connections, replay/unchanged, validation and DST, provenance, cross-workspace and wrong-kind, archived refusal, no AI or network; frontend tests for read-only first, edit/save/cancel, conflicts, validation, provenance and archived read-only; an isolated browser run with Fake AI.
   - **Priority:** P1
 
+- [ ] A.10 `[P1]` Version-specific approval and approval ledger (Batch 5B)
+  - New INSERT-only `approval` table (migration `b5a1c0de0001`, `UNIQUE(artifact_version_id)`), `GET /api/artifacts/{id}/approval` and `POST /api/artifacts/{id}/approvals`, eligibility rules per draft kind, and an approval section in the Gothic review panels. No delivery, no export, no AI.
+  - **Dependencies:** A.9
+  - **Requirements:** 23.1 to 23.8, INV-5 to INV-7
+  - **Acceptance test:** backend tests for creation, idempotency, two-connection races (approve/approve and approve/edit), stale versions and Redo, eligibility and acknowledgements, cross-workspace and wrong-kind, tampered data, archived sources, rollback, insert-only ledger, no AI or network; frontend tests for explicit confirmation, historical and older approvals, unknown outcomes, conflicts and The Crypt; an isolated browser run with Fake AI.
+  - **Priority:** P1
+
 ## Dependency-aware plan
 
 ```
@@ -225,7 +262,8 @@ Wave 5 (A.5). A.7 starts only after the PRD is re-supplied and A.4 is stable.
 | A.1 to A.5 | Planned |
 | A.7 intent inference and tool planning | Planned, deferred, not implemented |
 | A.8 calendar event draft (internal draft only) | Implemented in Batch 4B |
-| A.9 review, edit and version history | Implemented in Batch 5A, pending review |
+| A.9 review, edit and version history | Implemented in Batch 5A |
+| A.10 version-specific approval and approval ledger | Implemented in Batch 5B, pending review |
 
 ## Addendum: updates after reading the real PRD v2.0
 

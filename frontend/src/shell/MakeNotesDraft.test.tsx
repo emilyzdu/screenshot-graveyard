@@ -26,6 +26,9 @@ const ai = vi.hoisted(() => ({
   listStudyNoteVersions: vi.fn<(artifactId: number, f?: typeof fetch) => Promise<ApiResult<VersionInfo[]>>>(),
   listEventDraftVersions: vi.fn<(artifactId: number, f?: typeof fetch) => Promise<ApiResult<VersionInfo[]>>>(),
   saveEventDraftEdit: vi.fn(),
+  // Batch 5B: approval.
+  getApprovalStatus: vi.fn(),
+  approveVersion: vi.fn(),
   saveStudyNoteEdit: vi.fn(),
   getEventDraft: vi.fn(),
 }));
@@ -60,6 +63,11 @@ const deferred = <T,>() => { let resolve!: (v: T) => void; const promise = new P
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: nothing approved, current version eligible, for whatever draft is open.
+  ai.getApprovalStatus.mockImplementation(async (artifactId: number) => ({ ok: true, data: {
+    artifactId, kind: 'event_draft', currentVersionId: -1, currentVersionNumber: 1, status: 'never_approved', approvals: [],
+    eligibility: { eligible: false, reasons: [{ field: null, code: 'test_default', message: 'Not configured in this test.' }], requiredAcknowledgements: [], aiOriginFields: [] },
+  } }));
   ai.listStudyNoteVersions.mockImplementation(async () => ({ ok: true, data: [{ versionId: 1, versionNumber: 1, origin: 'ai_generate', isCurrent: true }] }));
   ai.listEventDraftVersions.mockImplementation(async () => ({ ok: true, data: [{ versionId: 1, versionNumber: 1, origin: 'ai_generate', isCurrent: true }] }));
   client.getWorkspace.mockResolvedValue({ ok: true, active: true });
@@ -99,7 +107,7 @@ describe('Make Notes: prepare, persist, reopen', () => {
     expect(await within(region()).findByText('Draft ready')).toBeInTheDocument();
     expect(ai.getOperation).toHaveBeenCalledWith(70, expect.any(Function));
     expect(within(region()).getByText('Simulated draft · Fake AI')).toBeInTheDocument();
-    expect(within(region()).getByText(/Saved in your workspace as draft #501(, version \d+)?\. Not approved, not exported and not sent anywhere/)).toBeInTheDocument();
+    expect(within(region()).getByText(/Saved in your workspace as draft #501(, version \d+)?\. Not exported and not sent anywhere/)).toBeInTheDocument();
     await act(async () => { fireEvent.click(within(region()).getByRole('button', { name: 'Open draft' })); });
     expect(ai.getStudyNote).toHaveBeenCalledWith(501, undefined, expect.any(Function));
     const body = within(region()).getByRole('article', { name: /Notes draft/ });

@@ -268,6 +268,8 @@ def create_app(
     application.include_router(build_preparations_router())
     from app.routers.event_drafts import build_event_drafts_router
     application.include_router(build_event_drafts_router())
+    from app.routers.approvals import build_approvals_router
+    application.include_router(build_approvals_router())
     from app.routers.study_selection import build_study_selection_router
     application.include_router(build_study_selection_router())
 

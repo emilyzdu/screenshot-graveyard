@@ -38,6 +38,9 @@ vi.mock('./api/ai', () => ({
   // Batch 5A: version history and edits (inert unless a test configures them).
   listEventDraftVersions: vi.fn(),
   saveEventDraftEdit: vi.fn(),
+  // Batch 5B: approval (inert unless a test configures it).
+  getApprovalStatus: vi.fn(),
+  approveVersion: vi.fn(),
   getEventDraft: vi.fn(),
   CATEGORIES: [],
 }));

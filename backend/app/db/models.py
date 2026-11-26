@@ -224,6 +224,42 @@ class Operation(Base):
     )
 
 
+class Approval(Base):
+    """Approval ledger (Batch 5B): one INSERT-only record per approved version.
+
+    Binds the workspace (the only actor identity this app has: there are no
+    user accounts), the artifact and the exact immutable ``artifact_version``.
+    ``version_number`` is informational. ``content_sha256`` is the SHA-256 of
+    the approved version's stored ``content_json``, so a later reader can prove
+    the approved bytes are unchanged. Approval never changes, replaces or adds a
+    version, and records nothing about delivery. ``UNIQUE(artifact_version_id)``
+    makes repeated or concurrent approvals of one version idempotent.
+    """
+
+    __tablename__ = "approval"
+    __table_args__ = (
+        UniqueConstraint("artifact_version_id", name="approval_artifact_version"),
+        Index("ix_approval_workspace_id", "workspace_id"),
+        Index("ix_approval_artifact_id", "artifact_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspace.id"), nullable=False)
+    artifact_id: Mapped[int] = mapped_column(ForeignKey("artifact.id"), nullable=False)
+    artifact_version_id: Mapped[int] = mapped_column(
+        ForeignKey("artifact_version.id"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # JSON list of fields whose uncertainty the user explicitly acknowledged.
+    acknowledged_uncertain_json: Mapped[str] = mapped_column(Text, nullable=False)
+    # JSON list of fields whose value came from AI and was not changed by the user.
+    ai_origin_fields_json: Mapped[str] = mapped_column(Text, nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
 class AppendOnlyViolationError(Exception):
     """Raised on any attempt to UPDATE or DELETE a retained artifact version."""
 
@@ -240,3 +276,14 @@ def _forbid_version_update(mapper, connection, target) -> None:  # noqa: ANN001
 @event.listens_for(ArtifactVersion, "before_delete")
 def _forbid_version_delete(mapper, connection, target) -> None:  # noqa: ANN001
     raise AppendOnlyViolationError("artifact versions are never deleted")
+
+
+@event.listens_for(Approval, "before_update")
+def _forbid_approval_update(mapper, connection, target) -> None:  # noqa: ANN001
+    # The approval ledger is history: a record is never changed.
+    raise AppendOnlyViolationError("approvals are append-only")
+
+
+@event.listens_for(Approval, "before_delete")
+def _forbid_approval_delete(mapper, connection, target) -> None:  # noqa: ANN001
+    raise AppendOnlyViolationError("approvals are never deleted")

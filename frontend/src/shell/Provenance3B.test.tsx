@@ -26,6 +26,9 @@ const ai = vi.hoisted(() => ({
   listStudyNoteVersions: vi.fn(),
   listEventDraftVersions: vi.fn(),
   saveEventDraftEdit: vi.fn(),
+  // Batch 5B: approval (inert unless a test configures it).
+  getApprovalStatus: vi.fn(),
+  approveVersion: vi.fn(),
   saveStudyNoteEdit: vi.fn(),
   getEventDraft: vi.fn(),
   getStudyNote: vi.fn(),

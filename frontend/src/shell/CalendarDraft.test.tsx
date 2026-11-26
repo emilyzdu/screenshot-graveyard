@@ -28,6 +28,9 @@ const ai = vi.hoisted(() => ({
   listStudyNoteVersions: vi.fn<(artifactId: number, f?: typeof fetch) => Promise<ApiResult<VersionInfo[]>>>(),
   listEventDraftVersions: vi.fn<(artifactId: number, f?: typeof fetch) => Promise<ApiResult<VersionInfo[]>>>(),
   saveEventDraftEdit: vi.fn(),
+  // Batch 5B: approval.
+  getApprovalStatus: vi.fn(),
+  approveVersion: vi.fn(),
   saveStudyNoteEdit: vi.fn(),
   getEventDraft: vi.fn<(artifactId: number, f?: typeof fetch) => Promise<ApiResult<EventDraftVersion>>>(),
 }));
@@ -67,6 +70,11 @@ const deferred = <T,>() => { let resolve!: (v: T) => void; const promise = new P
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: nothing approved, current version eligible, for whatever draft is open.
+  ai.getApprovalStatus.mockImplementation(async (artifactId: number) => ({ ok: true, data: {
+    artifactId, kind: 'event_draft', currentVersionId: -1, currentVersionNumber: 1, status: 'never_approved', approvals: [],
+    eligibility: { eligible: false, reasons: [{ field: null, code: 'test_default', message: 'Not configured in this test.' }], requiredAcknowledgements: [], aiOriginFields: [] },
+  } }));
   ai.listStudyNoteVersions.mockImplementation(async () => ({ ok: true, data: [{ versionId: 1, versionNumber: 1, origin: 'ai_generate', isCurrent: true }] }));
   ai.listEventDraftVersions.mockImplementation(async () => ({ ok: true, data: [{ versionId: 1, versionNumber: 1, origin: 'ai_generate', isCurrent: true }] }));
   client.getWorkspace.mockResolvedValue({ ok: true, active: true });

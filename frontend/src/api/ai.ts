@@ -633,3 +633,118 @@ export function studyNoteExportUrl(artifactId: number, versionId?: number): stri
   const q = versionId === undefined ? '' : `?versionId=${versionId}`;
   return `/api/study-notes/${artifactId}/export${q}`;
 }
+
+// ------------------------------------------------------ approval (Batch 5B)
+/** One durable approval of one exact saved version. The approver is this workspace (no user accounts). */
+export interface ApprovalRecord {
+  approvalId: number;
+  artifactId: number;
+  versionId: number;
+  versionNumber: number;
+  /** ISO-8601 with offset, as recorded by the server. */
+  approvedAt: string;
+  approvedBy: 'workspace';
+  acknowledgedUncertain: string[];
+  /** Fields whose value came from AI and that the user had not changed when approving. */
+  aiOriginFields: string[];
+}
+export type ApprovalState = 'current_approved' | 'older_approved' | 'never_approved';
+export interface ApprovalReason {
+  field: string | null;
+  code: string;
+  message: string;
+}
+export interface ApprovalStatus {
+  artifactId: number;
+  kind: 'study_note' | 'event_draft';
+  currentVersionId: number;
+  currentVersionNumber: number;
+  status: ApprovalState;
+  approvals: ApprovalRecord[];
+  eligibility: {
+    eligible: boolean;
+    reasons: ApprovalReason[];
+    requiredAcknowledgements: string[];
+    aiOriginFields: string[];
+  };
+}
+export interface ApproveResult {
+  approval: ApprovalRecord;
+  approvalResult: 'created' | 'existing';
+}
+
+const APPROVAL_STATES: readonly string[] = ['current_approved', 'older_approved', 'never_approved'];
+
+function parseApprovalRecord(v: unknown, artifactId: number): ApprovalRecord | null {
+  if (
+    !isObj(v) || typeof v.approvalId !== 'number' || v.artifactId !== artifactId ||
+    typeof v.versionId !== 'number' || typeof v.versionNumber !== 'number' ||
+    typeof v.approvedAt !== 'string' || Number.isNaN(Date.parse(v.approvedAt)) || v.approvedBy !== 'workspace' ||
+    !isStrArr(v.acknowledgedUncertain) || !isStrArr(v.aiOriginFields)
+  ) {
+    return null;
+  }
+  return {
+    approvalId: v.approvalId, artifactId, versionId: v.versionId, versionNumber: v.versionNumber,
+    approvedAt: v.approvedAt, approvedBy: 'workspace',
+    acknowledgedUncertain: v.acknowledgedUncertain, aiOriginFields: v.aiOriginFields,
+  };
+}
+
+function parseApprovalStatus(b: unknown, artifactId: number): ApprovalStatus | null {
+  if (!isObj(b) || b.artifactId !== artifactId || (b.kind !== 'study_note' && b.kind !== 'event_draft')) return null;
+  if (typeof b.currentVersionId !== 'number' || typeof b.currentVersionNumber !== 'number') return null;
+  if (typeof b.status !== 'string' || !APPROVAL_STATES.includes(b.status) || !Array.isArray(b.approvals)) return null;
+  const e = b.eligibility;
+  if (!isObj(e) || typeof e.eligible !== 'boolean' || !Array.isArray(e.reasons) ||
+      !isStrArr(e.requiredAcknowledgements) || !isStrArr(e.aiOriginFields)) {
+    return null;
+  }
+  const reasons: ApprovalReason[] = [];
+  for (const r of e.reasons) {
+    if (!isObj(r) || (r.field !== null && typeof r.field !== 'string') || typeof r.code !== 'string' || typeof r.message !== 'string') return null;
+    reasons.push({ field: r.field as string | null, code: r.code, message: r.message });
+  }
+  const approvals: ApprovalRecord[] = [];
+  for (const a of b.approvals) {
+    const rec = parseApprovalRecord(a, artifactId);
+    if (!rec) return null;
+    approvals.push(rec);
+  }
+  const status = b.status as ApprovalState;
+  // The state must agree with the records; anything else is not trusted.
+  const currentApproved = approvals.some((a) => a.versionId === b.currentVersionId);
+  const consistent =
+    (status === 'current_approved' && currentApproved) ||
+    (status === 'older_approved' && !currentApproved && approvals.length > 0) ||
+    (status === 'never_approved' && approvals.length === 0);
+  if (!consistent || (e.eligible && reasons.length > 0)) return null;
+  return {
+    artifactId, kind: b.kind, currentVersionId: b.currentVersionId, currentVersionNumber: b.currentVersionNumber,
+    status, approvals,
+    eligibility: { eligible: e.eligible, reasons, requiredAcknowledgements: e.requiredAcknowledgements, aiOriginFields: e.aiOriginFields },
+  };
+}
+
+/** Approval history and the current version's eligibility (read-only). */
+export function getApprovalStatus(artifactId: number, f: Fetch = fetch) {
+  return call(`/api/artifacts/${artifactId}/approval`, {}, (b) => parseApprovalStatus(b, artifactId), f);
+}
+
+/**
+ * Approve ONE exact saved version (the current one). The server re-checks that
+ * it is still current, complete and consistent. Repeating it is safe: an
+ * existing approval is returned, never duplicated. Nothing is sent anywhere.
+ */
+export function approveVersion(artifactId: number, versionId: number, acknowledgeUncertain: string[], f: Fetch = fetch) {
+  return call(
+    `/api/artifacts/${artifactId}/approvals`,
+    { method: 'POST', json: { versionId, confirmReviewed: true, acknowledgeUncertain } },
+    (b): ApproveResult | null => {
+      if (!isObj(b) || (b.approvalResult !== 'created' && b.approvalResult !== 'existing')) return null;
+      const approval = parseApprovalRecord(b.approval, artifactId);
+      return approval && approval.versionId === versionId ? { approval, approvalResult: b.approvalResult } : null;
+    },
+    f,
+  );
+}

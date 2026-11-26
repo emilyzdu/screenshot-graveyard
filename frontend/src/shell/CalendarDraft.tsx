@@ -13,6 +13,8 @@ import type { Screenshot } from '../api/client';
 import { DEFAULT_MAX_POLLS, DEFAULT_POLL_INTERVAL_MS } from '../ai/useOperationPolling';
 import { Icon } from '../ui/Icon';
 import { Badge, Button } from '../ui/primitives';
+import { ApprovalSection } from './ApprovalSection';
+import { useApprovalAttempts } from './approvalAttempts';
 import { EarlierVersionBanner, FieldHistoryNotice, FieldOriginTag, SourceLink, VersionHistory } from './DraftReviewParts';
 import { describeSaved, originLabel, useDraftHistory, type SaveOutcomeText } from './draftHistory';
 import { EventDraftEditor } from './EventDraftEditor';
@@ -84,6 +86,8 @@ export function CalendarDraft({
   // hidden until the user opens it.
   const readyArtifact = state.t === 'ready' ? state.prep.artifactId : null;
   const openRef = useRef(history.open);
+  // Approval attempts outlive the approval section (Hide draft, edit, new version).
+  const approvalAttempts = useApprovalAttempts();
   useLayoutEffect(() => {
     openRef.current = history.open;
   });
@@ -237,6 +241,19 @@ export function CalendarDraft({
                 disabled={editing}
                 onShow={(versionId) => void history.show(versionId)}
               />
+              {!editing && (
+                <ApprovalSection
+                  key={`approval-${loaded.current.versionId}`}
+                  artifactId={loaded.current.artifactId}
+                  shown={loaded.shown}
+                  current={loaded.current}
+                  provider={state.prep.provider}
+                  readOnly={readOnly}
+                  request={request}
+                  onLoadLatest={() => void history.open(loaded.current.artifactId)}
+                  attempts={approvalAttempts}
+                />
+              )}
             </div>
           )}
         </div>
@@ -312,7 +329,7 @@ function EventDraftBody({ draft, prep, screenshotId }: { draft: EventDraftVersio
         </dd>
       </dl>
       <p className="sg-muted">
-        Times are shown exactly as saved, in the listed time zone. Approval comes in a later version. Nothing has been
+        Times are shown exactly as saved, in the listed time zone. Approval status is shown below. Nothing has been
         added to a calendar.
       </p>
     </article>

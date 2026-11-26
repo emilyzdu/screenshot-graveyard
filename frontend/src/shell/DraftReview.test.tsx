@@ -29,6 +29,9 @@ const ai = vi.hoisted(() => ({
   getEventDraft: vi.fn<(artifactId: number, f?: typeof fetch, versionId?: number) => Promise<ApiResult<EventDraftVersion>>>(),
   listEventDraftVersions: vi.fn<(artifactId: number, f?: typeof fetch) => Promise<ApiResult<VersionInfo[]>>>(),
   saveEventDraftEdit: vi.fn(),
+  // Batch 5B: approval.
+  getApprovalStatus: vi.fn(),
+  approveVersion: vi.fn(),
 }));
 vi.mock('../api/ai', () => ai);
 
@@ -83,6 +86,11 @@ const fail = (status: number, code: string, message = code, field?: string): Api
 let eventCurrent: EventDraftVersion;
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: nothing approved, current version eligible, for whatever draft is open.
+  ai.getApprovalStatus.mockImplementation(async (artifactId: number) => ({ ok: true, data: {
+    artifactId, kind: 'event_draft', currentVersionId: -1, currentVersionNumber: 1, status: 'never_approved', approvals: [],
+    eligibility: { eligible: false, reasons: [{ field: null, code: 'test_default', message: 'Not configured in this test.' }], requiredAcknowledgements: [], aiOriginFields: [] },
+  } }));
   eventCurrent = eventV1;
   client.getWorkspace.mockResolvedValue({ ok: true, active: true });
   client.listScreenshots.mockResolvedValue({ ok: true, screenshots: [shot(1, 'poster.png')] });
@@ -1032,5 +1040,867 @@ describe('Check latest (Notes): freshness', () => {
     expect(statusText(form)).not.toContain(MATCH);
     expect(ai.saveStudyNoteEdit.mock.calls.length).toBe(writes);
     expect(within(form).getByLabelText('Main concepts item 1')).toHaveValue('Edited after the check');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch 5B: version-specific approval.
+import type { ApprovalRecord, ApprovalStatus } from '../api/ai';
+const APPROVED_AT = '2026-11-25T10:00:00+00:00';
+const rec = (versionId: number, versionNumber: number, over: Partial<ApprovalRecord> = {}): ApprovalRecord => ({
+  approvalId: 900 + versionNumber, artifactId: 601, versionId, versionNumber, approvedAt: APPROVED_AT, approvedBy: 'workspace',
+  acknowledgedUncertain: [], aiOriginFields: [], ...over,
+});
+const apStatus = (over: Partial<ApprovalStatus> = {}, elig: Partial<ApprovalStatus['eligibility']> = {}): ApiResult<ApprovalStatus> => ({
+  ok: true,
+  data: {
+    artifactId: 601, kind: 'event_draft', currentVersionId: eventCurrent.versionId, currentVersionNumber: eventCurrent.versionNumber,
+    status: 'never_approved', approvals: [],
+    eligibility: { eligible: true, reasons: [], requiredAcknowledgements: [], aiOriginFields: [], ...elig },
+    ...over,
+  },
+});
+const approvalRegion = () => within(calendar()).getByRole('region', { name: 'Approval' });
+async function openCalendarApproval() {
+  await openCalendar();
+  return within(calendar()).findByRole('region', { name: 'Approval' });
+}
+
+describe('Approval (Calendar): explicit, version-specific and grounded in the ledger', () => {
+  beforeEach(() => { eventCurrent = eventV2; });
+
+  it('approves the current version only after explicit review and acknowledgement', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({}, { requiredAcknowledgements: ['location'], aiOriginFields: ['description'] }));
+    const region = await openCalendarApproval();
+    expect(within(region).getByText('Not approved')).toBeInTheDocument();
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 2' })); });
+    const dialog = within(region).getByRole('alertdialog', { name: 'Approve version 2?' });
+    expect(dialog).toHaveTextContent('Approval confirms this saved version only. Nothing will be sent to another app');
+    expect(dialog).toHaveTextContent('written by the Fake AI (simulated, not read from your screenshot) and you have not changed them: Description.');
+    const confirm = within(dialog).getByRole('button', { name: 'Confirm approval of version 2' });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /I reviewed version 2/ }));
+    expect(confirm).toBeDisabled(); // the uncertain location still needs acknowledging
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /I understand Location is marked uncertain/ }));
+    expect(confirm).toBeEnabled();
+    ai.approveVersion.mockResolvedValue({ ok: true, data: { approval: rec(12, 2, { acknowledgedUncertain: ['location'] }), approvalResult: 'created' } });
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'current_approved', approvals: [rec(12, 2)] }));
+    await act(async () => { fireEvent.click(confirm); });
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1);
+    expect(ai.approveVersion).toHaveBeenCalledWith(601, 12, ['location'], expect.any(Function));
+    expect(within(approvalRegion()).getByText('Approved · version 2')).toBeInTheDocument();
+    expect(within(approvalRegion()).getByText(/Approved version 2\. Nothing was sent to another app/)).toBeInTheDocument();
+    expect(approvalRegion().querySelector('time')).toHaveAttribute('dateTime', APPROVED_AT);
+    expect(within(approvalRegion()).queryByRole('button', { name: /Approve version/ })).not.toBeInTheDocument();
+    // Approval never edited, prepared or classified anything.
+    expect(ai.saveEventDraftEdit).not.toHaveBeenCalled();
+    noAiOrPrepare();
+  });
+
+  it('rapid repeated confirms send one request', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus());
+    const region = await openCalendarApproval();
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 2' })); });
+    fireEvent.click(within(region).getByRole('checkbox', { name: /I reviewed version 2/ }));
+    let resolve!: (v: unknown) => void;
+    ai.approveVersion.mockReturnValue(new Promise((r) => { resolve = r; }));
+    const btn = within(region).getByRole('button', { name: 'Confirm approval of version 2' });
+    const key = Object.keys(btn).find((k) => k.startsWith('__reactProps'))!;
+    const onClick = (btn as unknown as Record<string, { onClick: () => void }>)[key].onClick;
+    await act(async () => { onClick(); onClick(); fireEvent.click(btn); });
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1);
+    await act(async () => { resolve({ ok: true, data: { approval: rec(12, 2), approvalResult: 'created' } }); });
+  });
+
+  it('a version that is not complete lists field-specific reasons and offers no Approve button', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({}, {
+      eligible: false,
+      reasons: [{ field: 'start_time', code: 'missing', message: 'Add a start time.' }, { field: 'time_zone', code: 'missing', message: 'Add a time zone.' }],
+    }));
+    const region = await openCalendarApproval();
+    const why = within(region).getByRole('note', { name: 'Why this version cannot be approved' });
+    expect(why).toHaveTextContent('Start time: Add a start time.');
+    expect(why).toHaveTextContent('Time zone: Add a time zone.');
+    expect(within(region).queryByRole('button', { name: /Approve version/ })).not.toBeInTheDocument();
+  });
+
+  it('an older approval is shown as older: the current version is NOT approved', async () => {
+    const v3: EventDraftVersion = { ...eventV2, versionId: 13, versionNumber: 3, content: { ...eventV2.content, title: 'Three' } };
+    eventCurrent = v3;
+    ai.listEventDraftVersions.mockResolvedValue(list(eventV1, eventV2, v3));
+    ai.getEventDraft.mockImplementation(async (_id, _f, versionId) => ({ ok: true, data: versionId === 12 ? eventV2 : versionId === 11 ? eventV1 : v3 }));
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'older_approved', approvals: [rec(12, 2)] }));
+    const region = await openCalendarApproval();
+    expect(region).toHaveTextContent('Version 2 was approved on');
+    expect(region).toHaveTextContent('The current version 3 is not approved.');
+    expect(within(region).queryByText(/Approved · version/)).not.toBeInTheDocument();
+    expect(within(region).getByRole('button', { name: 'Approve version 3' })).toBeInTheDocument();
+    // Viewing version 2 shows its own approval, read-only.
+    await act(async () => { fireEvent.click(within(calendar()).getByRole('button', { name: 'View version 2' })); });
+    const r2 = approvalRegion();
+    expect(r2).toHaveTextContent('Version 2 was approved on');
+    expect(r2).toHaveTextContent('Approval is only possible for the current version (version 3).');
+    expect(within(r2).queryByRole('button', { name: /Approve version/ })).not.toBeInTheDocument();
+    await act(async () => { fireEvent.click(within(calendar()).getByRole('button', { name: 'View version 1' })); });
+    expect(approvalRegion()).toHaveTextContent('Version 1 is not approved.');
+  });
+
+  it.each([
+    ['a network loss', fail(0, 'network')],
+    ['a 5xx', fail(502, 'http_502')],
+    ['an unreadable 200', { ok: false as const, status: 200, code: 'bad_shape', message: 'x' }],
+  ])('%s is an unknown outcome: never shown as approved; status can be checked', async (_n, res) => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus());
+    const region = await openCalendarApproval();
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 2' })); });
+    fireEvent.click(within(region).getByRole('checkbox', { name: /I reviewed version 2/ }));
+    ai.approveVersion.mockResolvedValue(res);
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Confirm approval of version 2' })); });
+    expect(within(approvalRegion()).getByRole('alert')).toHaveTextContent('We could not confirm whether the approval was recorded');
+    expect(within(approvalRegion()).queryByText(/Approved · version/)).not.toBeInTheDocument();
+    // The server did record it: a read-only check shows it.
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'current_approved', approvals: [rec(12, 2)] }));
+    const reads = ai.getApprovalStatus.mock.calls.length;
+    await act(async () => { fireEvent.click(within(approvalRegion()).getByRole('button', { name: 'Check approval status' })); });
+    expect(ai.getApprovalStatus.mock.calls.length).toBeGreaterThan(reads);
+    expect(within(approvalRegion()).getByText('Approved · version 2')).toBeInTheDocument();
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it('a version conflict says the reviewed version was not approved and offers to load the latest', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus());
+    const region = await openCalendarApproval();
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 2' })); });
+    fireEvent.click(within(region).getByRole('checkbox', { name: /I reviewed version 2/ }));
+    ai.approveVersion.mockResolvedValue(fail(409, 'version_conflict'));
+    const v3: EventDraftVersion = { ...eventV2, versionId: 13, versionNumber: 3, content: { ...eventV2.content, title: 'Three' } };
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ currentVersionId: 13, currentVersionNumber: 3 }));
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Confirm approval of version 2' })); });
+    expect(within(approvalRegion()).getByRole('alert')).toHaveTextContent('Version 2 was not approved');
+    expect(within(approvalRegion()).queryByRole('button', { name: /Approve version/ })).not.toBeInTheDocument();
+    eventCurrent = v3;
+    ai.listEventDraftVersions.mockResolvedValue(list(eventV1, eventV2, v3));
+    await act(async () => { fireEvent.click(within(approvalRegion()).getByRole('button', { name: 'Load latest version' })); });
+    expect(await within(calendar()).findByRole('article', { name: 'Event draft: Three' })).toBeInTheDocument();
+    expect(await within(approvalRegion()).findByRole('button', { name: 'Approve version 3' })).toBeInTheDocument();
+  });
+
+  it('when status cannot be read it is never shown as approved', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => fail(503, 'service_unavailable'));
+    const region = await openCalendarApproval();
+    expect(region).toHaveTextContent('Approval status is unavailable right now. It is not shown as approved.');
+    expect(within(region).queryByRole('button', { name: /Approve version/ })).not.toBeInTheDocument();
+  });
+
+  it('is hidden while editing, and a saved edit makes the new version unapproved', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'current_approved', approvals: [rec(12, 2)] }));
+    await openCalendarApproval();
+    expect(within(approvalRegion()).getByText('Approved · version 2')).toBeInTheDocument();
+    const form = await startEdit();
+    expect(within(calendar()).queryByRole('region', { name: 'Approval' })).not.toBeInTheDocument();
+    change(form, /^Location/, 'Hall');
+    const v3: EventDraftVersion = { ...eventV2, versionId: 13, versionNumber: 3, origin: 'manual_edit', content: { ...eventV2.content, location: 'Hall' } };
+    eventCurrent = v3;
+    ai.listEventDraftVersions.mockResolvedValue(list(eventV1, eventV2, v3));
+    ai.saveEventDraftEdit.mockResolvedValue({ ok: true, data: { ...v3, editResult: 'created' } });
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'older_approved', approvals: [rec(12, 2)] }));
+    await act(async () => { fireEvent.click(within(form).getByRole('button', { name: 'Save changes' })); });
+    const r = await within(calendar()).findByRole('region', { name: 'Approval' });
+    await waitFor(() => expect(r).toHaveTextContent('The current version 3 is not approved.'));
+    expect(within(r).queryByText(/Approved · version/)).not.toBeInTheDocument();
+  });
+
+  it('a late status answer for an older version never overrides the newer one', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus());
+    await openCalendarApproval();
+    const late = deferred<ApiResult<ApprovalStatus>>();
+    const form = await startEdit();
+    change(form, /^Location/, 'Hall');
+    const v3: EventDraftVersion = { ...eventV2, versionId: 13, versionNumber: 3, origin: 'manual_edit', content: { ...eventV2.content, location: 'Hall' } };
+    ai.saveEventDraftEdit.mockResolvedValue({ ok: true, data: { ...v3, editResult: 'created' } });
+    ai.listEventDraftVersions.mockResolvedValue(list(eventV1, eventV2, v3));
+    eventCurrent = v3;
+    ai.getApprovalStatus.mockImplementationOnce(() => late.promise).mockImplementation(async () => apStatus());
+    await act(async () => { fireEvent.click(within(form).getByRole('button', { name: 'Save changes' })); });
+    // Hide and reopen to start a fresh section while the first read is still held.
+    await act(async () => { fireEvent.click(within(calendar()).getByRole('button', { name: 'Hide draft' })); });
+    await act(async () => { fireEvent.click(within(calendar()).getByRole('button', { name: 'Open draft' })); });
+    expect(await within(approvalRegion()).findByRole('button', { name: 'Approve version 3' })).toBeInTheDocument();
+    await act(async () => { late.resolve(apStatus({ status: 'current_approved', currentVersionId: 13, currentVersionNumber: 3, approvals: [rec(13, 3)] })); });
+    expect(within(approvalRegion()).queryByText(/Approved · version/)).not.toBeInTheDocument();
+  });
+});
+
+describe('Approval: no fixed text contradicts the ledger', () => {
+  it('an approved draft never also says "Not approved" anywhere in its panel', async () => {
+    eventCurrent = eventV2;
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'current_approved', approvals: [rec(12, 2)] }));
+    ai.getMakeNotesPreparation.mockResolvedValue({ ok: true, data: prep('make_notes', 501) });
+    ai.getStudyNote.mockResolvedValue({ ok: true, data: noteV1 });
+    await openCalendarApproval();
+    expect(within(approvalRegion()).getByText('Approved · version 2')).toBeInTheDocument();
+    expect(calendar().textContent).not.toMatch(/not approved|approval comes in a later version/i);
+    await act(async () => { fireEvent.click(within(notes()).getByRole('button', { name: 'Open draft' })); });
+    expect(notes().textContent).not.toMatch(/approval comes in a later version/i);
+    expect(within(notes()).getByText(/version 1\. Not exported and not sent anywhere/)).toBeInTheDocument();
+  });
+});
+
+describe('Approval: remaining guards', () => {
+  beforeEach(() => { eventCurrent = eventV2; });
+
+  it('with nothing to acknowledge, Confirm still waits for "I reviewed"', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus());
+    const region = await openCalendarApproval();
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 2' })); });
+    const confirm = within(region).getByRole('button', { name: 'Confirm approval of version 2' });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(within(region).getByRole('checkbox', { name: /I reviewed version 2/ }));
+    expect(confirm).toBeEnabled();
+  });
+
+  it('two status checks answering out of order: the newer read wins', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus());
+    const region = await openCalendarApproval();
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 2' })); });
+    fireEvent.click(within(region).getByRole('checkbox', { name: /I reviewed version 2/ }));
+    ai.approveVersion.mockResolvedValue(fail(0, 'network'));
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Confirm approval of version 2' })); });
+    const older = deferred<ApiResult<ApprovalStatus>>();
+    ai.getApprovalStatus.mockImplementationOnce(() => older.promise).mockImplementationOnce(async () => apStatus());
+    const check = within(approvalRegion()).getByRole('button', { name: 'Check approval status' });
+    await act(async () => { fireEvent.click(check); });
+    await act(async () => { fireEvent.click(check); });
+    await act(async () => { older.resolve(apStatus({ status: 'current_approved', approvals: [rec(12, 2)] })); });
+    expect(within(approvalRegion()).queryByText(/Approved · version/)).not.toBeInTheDocument();
+  });
+});
+
+describe('Approval (Notes) and The Crypt', () => {
+  it('Notes: simulated content is named in the confirmation and approval targets the exact version', async () => {
+    ai.getEventDraftPreparation.mockResolvedValue(fail(404, 'no_preparation'));
+    ai.getMakeNotesPreparation.mockResolvedValue({ ok: true, data: prep('make_notes', 501) });
+    ai.getApprovalStatus.mockImplementation(async () => ({ ok: true, data: {
+      artifactId: 501, kind: 'study_note', currentVersionId: 21, currentVersionNumber: 1, status: 'never_approved', approvals: [],
+      eligibility: { eligible: true, reasons: [], requiredAcknowledgements: [], aiOriginFields: ['main_concepts', 'topic'] },
+    } }));
+    await openNotes();
+    const region = await within(notes()).findByRole('region', { name: 'Approval' });
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 1' })); });
+    const dialog = within(region).getByRole('alertdialog', { name: 'Approve version 1?' });
+    expect(dialog).toHaveTextContent('written by the Fake AI (simulated, not read from your screenshot) and you have not changed them: Main concepts, Topic.');
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /I reviewed version 1/ }));
+    ai.approveVersion.mockResolvedValue({ ok: true, data: { approval: { ...rec(21, 1), artifactId: 501 }, approvalResult: 'existing' } });
+    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm approval of version 1' })); });
+    expect(ai.approveVersion).toHaveBeenCalledWith(501, 21, [], expect.any(Function));
+    expect(within(notes()).getByText('Version 1 was already approved. Nothing new was recorded.')).toBeInTheDocument();
+  });
+
+  it('The Crypt shows approval status read-only, with no Approve button', async () => {
+    eventCurrent = eventV2;
+    client.listScreenshots.mockResolvedValue({ ok: true, screenshots: [shot(1, 'poster.png', 'archived')] });
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'current_approved', approvals: [rec(12, 2)] }, {
+      eligible: false, reasons: [{ field: null, code: 'screenshot_archived', message: 'The source screenshot is in The Crypt. Resurrect it to approve this draft.' }],
+    }));
+    render(<LiveWorkspace />);
+    fireEvent.click(await screen.findByRole('button', { name: /The Crypt/ }));
+    const opener = await screen.findByRole('button', { name: 'Open details for poster.png' });
+    await act(async () => { fireEvent.click(opener); });
+    const cal = calendar(screen.getByRole('dialog'));
+    await within(cal).findByText('Draft ready');
+    await act(async () => { fireEvent.click(within(cal).getByRole('button', { name: 'Open draft' })); });
+    const region = await within(cal).findByRole('region', { name: 'Approval' });
+    expect(within(region).getByText('Approved · version 2')).toBeInTheDocument();
+    expect(within(region).queryByRole('button', { name: /Approve version|Confirm approval/ })).not.toBeInTheDocument();
+    expect(ai.approveVersion).not.toHaveBeenCalled();
+  });
+
+  it('The Crypt never offers approval, even if a status answer says the version is eligible', async () => {
+    eventCurrent = eventV2;
+    client.listScreenshots.mockResolvedValue({ ok: true, screenshots: [shot(1, 'poster.png', 'archived')] });
+    ai.getApprovalStatus.mockImplementation(async () => apStatus()); // eligible, never approved
+    render(<LiveWorkspace />);
+    fireEvent.click(await screen.findByRole('button', { name: /The Crypt/ }));
+    const opener = await screen.findByRole('button', { name: 'Open details for poster.png' });
+    await act(async () => { fireEvent.click(opener); });
+    const cal = calendar(screen.getByRole('dialog'));
+    await within(cal).findByText('Draft ready');
+    await act(async () => { fireEvent.click(within(cal).getByRole('button', { name: 'Open draft' })); });
+    const region = await within(cal).findByRole('region', { name: 'Approval' });
+    expect(within(region).getByText('Not approved')).toBeInTheDocument();
+    expect(within(region).queryByRole('button', { name: /Approve version/ })).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch 5B remediation: B4 (badge belongs to the viewed version) and B5
+// (an unknown outcome resolves only for the exact submitted version).
+const noteStatus = (over: Partial<ApprovalStatus> = {}): ApiResult<ApprovalStatus> => ({
+  ok: true,
+  data: {
+    artifactId: 501, kind: 'study_note', currentVersionId: 21, currentVersionNumber: 1, status: 'never_approved', approvals: [],
+    eligibility: { eligible: true, reasons: [], requiredAcknowledgements: [], aiOriginFields: [] },
+    ...over,
+  },
+});
+const noteRec = (versionId: number, versionNumber: number): ApprovalRecord => ({ ...rec(versionId, versionNumber), artifactId: 501 });
+const notesApproval = () => within(notes()).getByRole('region', { name: 'Approval' });
+async function openNotesApproval() {
+  ai.getEventDraftPreparation.mockResolvedValue(fail(404, 'no_preparation'));
+  ai.getMakeNotesPreparation.mockResolvedValue({ ok: true, data: prep('make_notes', 501) });
+  await openNotes();
+  return within(notes()).findByRole('region', { name: 'Approval' });
+}
+
+describe('B4: the approval badge always describes the version on screen', () => {
+  beforeEach(() => { eventCurrent = eventV2; });
+
+  it('Calendar: a delayed status read reporting an outside v3 approval never labels v2 as approved', async () => {
+    const held = deferred<ApiResult<ApprovalStatus>>();
+    ai.getApprovalStatus.mockImplementationOnce(() => held.promise).mockImplementation(async () => apStatus());
+    await openCalendar();
+    // Meanwhile another tab saved and approved version 3.
+    await act(async () => {
+      held.resolve(apStatus({ status: 'current_approved', currentVersionId: 13, currentVersionNumber: 3, approvals: [rec(13, 3)] }));
+    });
+    const region = approvalRegion();
+    expect(within(calendar()).getByRole('article', { name: 'Event draft: Study group' })).toBeInTheDocument(); // still v2 content
+    expect(within(region).queryByText(/Approved · version/)).not.toBeInTheDocument();
+    expect(region).toHaveTextContent('Version 2 is not approved.');
+    expect(region).toHaveTextContent('A newer version (version 3) has been saved and approved.');
+    expect(within(region).queryByRole('button', { name: /Approve version/ })).not.toBeInTheDocument();
+    // Explicitly loading the latest shows version 3 with its own approval.
+    const v3: EventDraftVersion = { ...eventV2, versionId: 13, versionNumber: 3, content: { ...eventV2.content, title: 'Three' } };
+    eventCurrent = v3;
+    ai.listEventDraftVersions.mockResolvedValue(list(eventV1, eventV2, v3));
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'current_approved', currentVersionId: 13, currentVersionNumber: 3, approvals: [rec(13, 3)] }));
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Load latest version' })); });
+    expect(await within(calendar()).findByRole('article', { name: 'Event draft: Three' })).toBeInTheDocument();
+    expect(await within(approvalRegion()).findByText('Approved · version 3')).toBeInTheDocument();
+  });
+
+  it('Calendar: the viewed version keeps its own approval when a newer unapproved version exists elsewhere', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'older_approved', currentVersionId: 13, currentVersionNumber: 3, approvals: [rec(12, 2)] }));
+    const region = await openCalendarApproval();
+    expect(within(region).getByText('Approved · version 2')).toBeInTheDocument();
+    expect(region).toHaveTextContent('A newer version (version 3) has been saved. It is not approved.');
+    expect(within(region).getByRole('button', { name: 'Load latest version' })).toBeInTheDocument();
+  });
+
+  it('Notes: an outside approval of version 2 is reported separately from version 1 on screen', async () => {
+    const held = deferred<ApiResult<ApprovalStatus>>();
+    ai.getApprovalStatus.mockImplementationOnce(() => held.promise).mockImplementation(async () => noteStatus());
+    await openNotesApproval().catch(() => undefined);
+    await act(async () => {
+      held.resolve(noteStatus({ status: 'current_approved', currentVersionId: 22, currentVersionNumber: 2, approvals: [noteRec(22, 2)] }));
+    });
+    const region = notesApproval();
+    expect(within(region).queryByText(/Approved · version/)).not.toBeInTheDocument();
+    expect(region).toHaveTextContent('Version 1 is not approved.');
+    expect(region).toHaveTextContent('A newer version (version 2) has been saved and approved.');
+    expect(within(region).getByRole('button', { name: 'Load latest version' })).toBeInTheDocument();
+    expect(within(region).queryByRole('button', { name: /Approve version/ })).not.toBeInTheDocument();
+  });
+
+  it('Notes: viewing an older version never borrows the current version\'s approval', async () => {
+    useNotesWithTwoVersions();
+    ai.getApprovalStatus.mockImplementation(async () => noteStatus({ status: 'current_approved', currentVersionId: 22, currentVersionNumber: 2, approvals: [noteRec(22, 2)] }));
+    await openNotes();
+    expect(await within(notesApproval()).findByText('Approved · version 2')).toBeInTheDocument();
+    await act(async () => { fireEvent.click(within(notes()).getByRole('button', { name: 'View version 1' })); });
+    const region = notesApproval();
+    expect(within(region).queryByText(/Approved · version/)).not.toBeInTheDocument();
+    expect(region).toHaveTextContent('Version 1 is not approved.');
+    expect(region).toHaveTextContent('Version 2 was approved on');
+  });
+});
+
+describe('B5: "Check approval status" resolves an unknown outcome only for the submitted version', () => {
+  beforeEach(() => { eventCurrent = eventV2; });
+
+  async function calendarUnknown() {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus());
+    const region = await openCalendarApproval();
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 2' })); });
+    fireEvent.click(within(region).getByRole('checkbox', { name: /I reviewed version 2/ }));
+    ai.approveVersion.mockResolvedValue(fail(0, 'network'));
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Confirm approval of version 2' })); });
+    expect(within(approvalRegion()).getByRole('alert')).toHaveTextContent('We could not confirm whether the approval was recorded');
+  }
+
+  it('Calendar: the exact version found approved clears the notice and closes the confirmation', async () => {
+    await calendarUnknown();
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'current_approved', approvals: [rec(12, 2)] }));
+    await act(async () => { fireEvent.click(within(approvalRegion()).getByRole('button', { name: 'Check approval status' })); });
+    const region = approvalRegion();
+    expect(within(region).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(region).queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(within(region).queryByRole('button', { name: 'Check approval status' })).not.toBeInTheDocument();
+    expect(within(region).getByRole('status')).toHaveTextContent('Approved version 2 on');
+    expect(within(region).getByRole('status').querySelector('time')).toHaveAttribute('dateTime', APPROVED_AT);
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1); // the check never submits
+  });
+
+  it('Calendar: a DIFFERENT approved version does not resolve the uncertainty', async () => {
+    await calendarUnknown();
+    ai.getApprovalStatus.mockImplementation(async () =>
+      apStatus({ status: 'current_approved', currentVersionId: 13, currentVersionNumber: 3, approvals: [rec(13, 3)] }));
+    await act(async () => { fireEvent.click(within(approvalRegion()).getByRole('button', { name: 'Check approval status' })); });
+    const region = approvalRegion();
+    expect(within(region).getByRole('alert')).toHaveTextContent('We could not confirm whether the approval was recorded');
+    expect(within(region).getByRole('button', { name: 'Check approval status' })).toBeInTheDocument();
+    expect(within(region).queryByText(/Approved · version 2|Approved version 2/)).not.toBeInTheDocument();
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it('Calendar: if the follow-up status read also fails, the uncertainty stays visible until a check resolves it', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus());
+    const region = await openCalendarApproval();
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 2' })); });
+    fireEvent.click(within(region).getByRole('checkbox', { name: /I reviewed version 2/ }));
+    ai.approveVersion.mockResolvedValue(fail(0, 'network'));
+    ai.getApprovalStatus.mockImplementationOnce(async () => fail(0, 'network'));
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Confirm approval of version 2' })); });
+    expect(approvalRegion()).toHaveTextContent('Approval status is unavailable right now. It is not shown as approved.');
+    expect(within(approvalRegion()).getByRole('alert')).toHaveTextContent('We could not confirm whether the approval was recorded');
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'current_approved', approvals: [rec(12, 2)] }));
+    await act(async () => { fireEvent.click(within(approvalRegion()).getByRole('button', { name: 'Check approval status' })); });
+    expect(within(approvalRegion()).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(approvalRegion()).getByRole('status')).toHaveTextContent('Approved version 2 on');
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it('Notes: the exact version found approved clears the notice and closes the confirmation', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => noteStatus());
+    const region = await openNotesApproval();
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 1' })); });
+    fireEvent.click(within(region).getByRole('checkbox', { name: /I reviewed version 1/ }));
+    ai.approveVersion.mockResolvedValue(fail(502, 'http_502'));
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Confirm approval of version 1' })); });
+    expect(within(notesApproval()).getByRole('alert')).toHaveTextContent('We could not confirm');
+    ai.getApprovalStatus.mockImplementation(async () => noteStatus({ status: 'current_approved', approvals: [noteRec(21, 1)] }));
+    await act(async () => { fireEvent.click(within(notesApproval()).getByRole('button', { name: 'Check approval status' })); });
+    const r = notesApproval();
+    expect(within(r).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(r).queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(within(r).getByRole('status')).toHaveTextContent('Approved version 1 on');
+    expect(within(r).getByText('Approved · version 1')).toBeInTheDocument();
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch 5B remediation F1: a rejected retry never erases an earlier unknown outcome.
+import { ApprovalSection } from './ApprovalSection';
+import { attemptKey, attemptsReducer, type ApprovalAttempt, type AttemptState } from './approvalAttempts';
+import { useReducer } from 'react';
+const AP_UNKNOWN = 'We could not confirm whether the approval was recorded';
+const RETRY_REJECTED = 'This retry was rejected, but your earlier approval attempt may still have succeeded. Check approval status for the original version';
+const checkStatus = () => within(approvalRegion()).getByRole('button', { name: 'Check approval status' });
+const confirmV2 = () => within(approvalRegion()).getByRole('button', { name: 'Confirm approval of version 2' });
+
+describe('F1: an unknown approval outcome survives a rejected retry', () => {
+  beforeEach(() => { eventCurrent = eventV2; });
+
+  async function unknownThenAbsent() {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus()); // the follow-up read finds no approval yet
+    const region = await openCalendarApproval();
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 2' })); });
+    fireEvent.click(within(region).getByRole('checkbox', { name: /I reviewed version 2/ }));
+    ai.approveVersion.mockResolvedValueOnce(fail(0, 'network'));
+    await act(async () => { fireEvent.click(confirmV2()); });
+    expect(within(approvalRegion()).getByRole('alert')).toHaveTextContent(AP_UNKNOWN);
+    expect(checkStatus()).toBeInTheDocument();
+  }
+
+  it.each([
+    ['429', fail(429, 'rate_limited')],
+    ['409 not approvable', fail(409, 'not_approvable')],
+    ['409 version conflict', fail(409, 'version_conflict')],
+    ['422', fail(422, 'validation_error')],
+  ])('retry rejected with %s: the earlier attempt stays unresolved and checkable', async (_n, res) => {
+    await unknownThenAbsent();
+    ai.approveVersion.mockResolvedValueOnce(res);
+    await act(async () => { fireEvent.click(confirmV2()); });
+    const region = approvalRegion();
+    expect(region).not.toHaveTextContent('The approval was not recorded.');
+    expect(within(region).getByRole('alert')).toHaveTextContent(RETRY_REJECTED);
+    expect(checkStatus()).toBeInTheDocument();
+    expect(within(region).queryByText(/Approved · version 2|Approved version 2/)).not.toBeInTheDocument();
+    // The earlier request committed after all: the exact version resolves it.
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'current_approved', approvals: [rec(12, 2)] }));
+    const posts = ai.approveVersion.mock.calls.length;
+    await act(async () => { fireEvent.click(checkStatus()); });
+    expect(within(approvalRegion()).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(approvalRegion()).getByRole('status')).toHaveTextContent('Approved version 2 on');
+    expect(ai.approveVersion.mock.calls.length).toBe(posts); // checking never POSTs
+  });
+
+  it('retry answered 5xx: still unknown, still checkable', async () => {
+    await unknownThenAbsent();
+    ai.approveVersion.mockResolvedValueOnce(fail(502, 'http_502'));
+    await act(async () => { fireEvent.click(confirmV2()); });
+    expect(approvalRegion()).not.toHaveTextContent('The approval was not recorded.');
+    expect(within(approvalRegion()).getByRole('alert')).toHaveTextContent(AP_UNKNOWN);
+    expect(checkStatus()).toBeInTheDocument();
+  });
+
+  it('a check that still finds nothing keeps the uncertainty; a later check finds the delayed approval', async () => {
+    await unknownThenAbsent();
+    await act(async () => { fireEvent.click(checkStatus()); });
+    expect(within(approvalRegion()).getByRole('alert')).toHaveTextContent(AP_UNKNOWN);
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'current_approved', approvals: [rec(12, 2)] }));
+    await act(async () => { fireEvent.click(checkStatus()); });
+    expect(within(approvalRegion()).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(approvalRegion()).getByText('Approved · version 2')).toBeInTheDocument();
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it('another version being approved does not resolve it', async () => {
+    await unknownThenAbsent();
+    ai.getApprovalStatus.mockImplementation(async () =>
+      apStatus({ status: 'current_approved', currentVersionId: 13, currentVersionNumber: 3, approvals: [rec(13, 3)] }));
+    await act(async () => { fireEvent.click(checkStatus()); });
+    expect(within(approvalRegion()).getByRole('alert')).toHaveTextContent(AP_UNKNOWN);
+    expect(checkStatus()).toBeInTheDocument();
+  });
+
+  it('an initial 429 with no earlier unknown attempt is a definite rejection', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => apStatus());
+    const region = await openCalendarApproval();
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Approve version 2' })); });
+    fireEvent.click(within(region).getByRole('checkbox', { name: /I reviewed version 2/ }));
+    ai.approveVersion.mockResolvedValueOnce(fail(429, 'rate_limited'));
+    await act(async () => { fireEvent.click(confirmV2()); });
+    expect(within(approvalRegion()).getByRole('alert')).toHaveTextContent('The approval was not recorded.');
+    expect(approvalRegion()).not.toHaveTextContent(RETRY_REJECTED);
+    expect(within(approvalRegion()).queryByRole('button', { name: 'Check approval status' })).not.toBeInTheDocument();
+  });
+
+  it('the pending version survives the section being hidden for an edit and a new version being saved', async () => {
+    await unknownThenAbsent();
+    const form = await startEdit();
+    change(form, /^Location/, 'Hall');
+    const v3: EventDraftVersion = { ...eventV2, versionId: 13, versionNumber: 3, origin: 'manual_edit', content: { ...eventV2.content, location: 'Hall' } };
+    eventCurrent = v3;
+    ai.listEventDraftVersions.mockResolvedValue(list(eventV1, eventV2, v3));
+    ai.saveEventDraftEdit.mockResolvedValue({ ok: true, data: { ...v3, editResult: 'created' } });
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ currentVersionId: 13, currentVersionNumber: 3 }));
+    await act(async () => { fireEvent.click(within(form).getByRole('button', { name: 'Save changes' })); });
+    const r = await within(calendar()).findByRole('region', { name: 'Approval' });
+    await waitFor(() => expect(within(r).getByRole('alert')).toHaveTextContent(`${AP_UNKNOWN} for version 2`));
+    expect(within(r).getByRole('button', { name: 'Approve version 3' })).toBeInTheDocument(); // v3 is separate
+    ai.getApprovalStatus.mockImplementation(async () => apStatus({ status: 'older_approved', currentVersionId: 13, currentVersionNumber: 3, approvals: [rec(12, 2)] }));
+    await act(async () => { fireEvent.click(within(approvalRegion()).getByRole('button', { name: 'Check approval status' })); });
+    expect(within(approvalRegion()).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(approvalRegion()).getByRole('status')).toHaveTextContent('Approved version 2 on');
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it('a pending attempt on the Calendar draft is never shown on the Notes draft', async () => {
+    ai.getMakeNotesPreparation.mockResolvedValue({ ok: true, data: prep('make_notes', 501) });
+    ai.getStudyNote.mockResolvedValue({ ok: true, data: noteV1 });
+    await unknownThenAbsent();
+    ai.getApprovalStatus.mockImplementation(async (id) => (id === 501 ? noteStatus() : apStatus()));
+    await act(async () => { fireEvent.click(within(notes()).getByRole('button', { name: 'Open draft' })); });
+    const nr = await within(notes()).findByRole('region', { name: 'Approval' });
+    await within(nr).findByRole('button', { name: 'Approve version 1' });
+    expect(within(nr).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(nr).queryByRole('button', { name: 'Check approval status' })).not.toBeInTheDocument();
+  });
+
+  it('a pending entry for another artifact is never displayed, used or overwritten', async () => {
+    ai.getApprovalStatus.mockImplementation(async () => {
+      const r = apStatus({ currentVersionId: 31, currentVersionNumber: 3 });
+      return r.ok ? { ok: true as const, data: { ...r.data, artifactId: 602 } } : r;
+    });
+    const other: ApprovalAttempt = { artifactId: 601, versionId: 12, versionNumber: 2, phase: 'unknown', inFlight: null, retryRejected: false };
+    let seen: AttemptState = {};
+    function Harness() {
+      const [state, dispatch] = useReducer(attemptsReducer, { [attemptKey(601, 12)]: other });
+      seen = state;
+      return (
+        <ApprovalSection artifactId={602} shown={{ versionId: 31, versionNumber: 3 }} current={{ versionId: 31, versionNumber: 3 }}
+          provider="fake" onLoadLatest={() => undefined} request={() => fetch} attempts={{ state, dispatch }} />
+      );
+    }
+    render(<Harness />);
+    const region = await screen.findByRole('region', { name: 'Approval' });
+    await act(async () => { fireEvent.click(await within(region).findByRole('button', { name: 'Approve version 3' })); });
+    expect(within(region).queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.click(within(region).getByRole('checkbox', { name: /I reviewed version 3/ }));
+    ai.approveVersion.mockResolvedValueOnce(fail(0, 'network'));
+    await act(async () => { fireEvent.click(within(region).getByRole('button', { name: 'Confirm approval of version 3' })); });
+    const alert = within(screen.getByRole('region', { name: 'Approval' })).getByRole('alert');
+    expect(alert).toHaveTextContent(`${AP_UNKNOWN} for version 3`);
+    expect(alert).not.toHaveTextContent('version 2');
+    expect(seen[attemptKey(601, 12)]).toBe(other); // untouched
+    expect(seen[attemptKey(602, 31)]).toMatchObject({ phase: 'unknown', inFlight: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch 5B remediation T1/T2: attempt state is owned by the draft panel and
+// changes only through ordered transitions (deferred promises fix the order).
+import type { ApproveResult } from '../api/ai';
+type PanelName = 'Calendar' | 'Notes';
+const AP = {
+  Calendar: {
+    v: 2, vid: 12, other: 13,
+    open: async () => { eventCurrent = eventV2; ai.getApprovalStatus.mockImplementation(async () => apStatus()); return openCalendarApproval(); },
+    region: () => approvalRegion(), panel: () => calendar(),
+    status: (approved: ApprovalRecord[]) => apStatus(approved.length ? { status: 'current_approved', approvals: approved } : {}),
+    rec: (vid: number, n: number) => rec(vid, n),
+  },
+  Notes: {
+    v: 1, vid: 21, other: 22,
+    open: async () => { ai.getApprovalStatus.mockImplementation(async () => noteStatus()); return openNotesApproval(); },
+    region: () => notesApproval(), panel: () => notes(),
+    status: (approved: ApprovalRecord[]) => noteStatus(approved.length ? { status: 'current_approved', approvals: approved } : {}),
+    rec: (vid: number, n: number) => noteRec(vid, n),
+  },
+} as const;
+const PANEL_NAMES: PanelName[] = ['Calendar', 'Notes'];
+const T_UNKNOWN = 'We could not confirm whether the approval was recorded';
+
+async function beginApproval(name: PanelName) {
+  const P = AP[name];
+  const region = await P.open();
+  await act(async () => { fireEvent.click(within(region).getByRole('button', { name: `Approve version ${P.v}` })); });
+  fireEvent.click(within(P.region()).getByRole('checkbox', { name: new RegExp(`I reviewed version ${P.v}`) }));
+  return P;
+}
+const confirmBtn = (name: PanelName) => within(AP[name].region()).getByRole('button', { name: `Confirm approval of version ${AP[name].v}` });
+const checkBtnT = (name: PanelName) => within(AP[name].region()).getByRole('button', { name: 'Check approval status' });
+
+describe.each(PANEL_NAMES)('T1 (%s): Hide and reopen keeps an unresolved approval', (name) => {
+  it.each([
+    ['a lost response', fail(0, 'network')],
+    ['a 5xx', fail(502, 'http_502')],
+  ])('POST held, draft hidden and reopened, then %s: the reopened panel shows the uncertainty', async (_n, outcome) => {
+    const P = await beginApproval(name);
+    const held = deferred<ApiResult<ApproveResult>>();
+    ai.approveVersion.mockImplementationOnce(() => held.promise);
+    await act(async () => { fireEvent.click(confirmBtn(name)); });
+    await act(async () => { fireEvent.click(within(P.panel()).getByRole('button', { name: 'Hide draft' })); });
+    await act(async () => { fireEvent.click(within(P.panel()).getByRole('button', { name: 'Open draft' })); });
+    const reopened = await within(P.panel()).findByRole('region', { name: 'Approval' });
+    // While the original request is still out, the reopened panel knows it.
+    await within(reopened).findByText(`An approval request for version ${P.v} is still being processed.`);
+    expect(within(reopened).queryByRole('button', { name: `Approve version ${P.v}` })).not.toBeInTheDocument();
+    await act(async () => { held.resolve(outcome); });
+    const r = P.region();
+    expect(within(r).getByRole('alert')).toHaveTextContent(`${T_UNKNOWN} for version ${P.v}`);
+    expect(checkBtnT(name)).toBeInTheDocument();
+    // The ledger later shows the exact version: resolved, and checking never POSTs.
+    ai.getApprovalStatus.mockImplementation(async () => P.status([P.rec(P.vid, P.v)]));
+    await act(async () => { fireEvent.click(checkBtnT(name)); });
+    expect(within(P.region()).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(P.region()).getByRole('status')).toHaveTextContent(`Approved version ${P.v} on`);
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe.each(PANEL_NAMES)('T2 (%s): a confirmed approval is never downgraded', (name) => {
+  async function unknownThenRetryHeld() {
+    const P = await beginApproval(name);
+    ai.approveVersion.mockResolvedValueOnce(fail(0, 'network'));
+    await act(async () => { fireEvent.click(confirmBtn(name)); });
+    expect(within(P.region()).getByRole('alert')).toHaveTextContent(T_UNKNOWN);
+    const retry = deferred<ApiResult<ApproveResult>>();
+    ai.approveVersion.mockImplementationOnce(() => retry.promise);
+    await act(async () => { fireEvent.click(confirmBtn(name)); });
+    // A separate check confirms the exact version while the retry is still out.
+    ai.getApprovalStatus.mockImplementation(async () => P.status([P.rec(P.vid, P.v)]));
+    await act(async () => { fireEvent.click(checkBtnT(name)); });
+    expect(within(P.region()).getByText(`Approved · version ${P.v}`)).toBeInTheDocument();
+    return { P, retry };
+  }
+
+  it.each([
+    ['429', fail(429, 'rate_limited')],
+    ['a lost response', fail(0, 'network')],
+    ['a 5xx', fail(503, 'service_unavailable')],
+  ])('the retry later answers %s: the confirmed approval stays', async (_n, late) => {
+    const { P, retry } = await unknownThenRetryHeld();
+    await act(async () => { retry.resolve(late); });
+    const r = P.region();
+    expect(within(r).queryByRole('alert')).not.toBeInTheDocument();
+    expect(r).not.toHaveTextContent(/could not confirm|This retry was rejected|not recorded/);
+    expect(within(r).getByText(`Approved · version ${P.v}`)).toBeInTheDocument();
+    expect(ai.approveVersion).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['429', fail(429, 'rate_limited')],
+    ['a lost response', fail(0, 'network')],
+    ['a 5xx', fail(503, 'service_unavailable')],
+  ])('the retry answers %s and its follow-up status read fails: still confirmed, never unknown', async (_n, late) => {
+    const { P, retry } = await unknownThenRetryHeld();
+    ai.getApprovalStatus.mockImplementation(async () => fail(0, 'network'));
+    await act(async () => { retry.resolve(late); });
+    const r = P.region();
+    expect(within(r).queryByRole('alert')).not.toBeInTheDocument();
+    expect(r).not.toHaveTextContent(/could not confirm|This retry was rejected|not recorded/);
+    expect(r).toHaveTextContent(`Approved version ${P.v} on`);
+  });
+
+  it('a later failed check and a stale empty read do not erase the confirmation', async () => {
+    const { P, retry } = await unknownThenRetryHeld();
+    await act(async () => { retry.resolve(fail(429, 'rate_limited')); });
+    ai.getApprovalStatus.mockImplementation(async () => fail(503, 'service_unavailable'));
+    await act(async () => { fireEvent.click(within(P.panel()).getByRole('button', { name: 'Hide draft' })); });
+    await act(async () => { fireEvent.click(within(P.panel()).getByRole('button', { name: 'Open draft' })); });
+    const r = await within(P.panel()).findByRole('region', { name: 'Approval' });
+    await waitFor(() => expect(r).toHaveTextContent(`Approved version ${P.v} on`));
+    expect(within(r).queryByRole('alert')).not.toBeInTheDocument();
+    expect(ai.approveVersion).toHaveBeenCalledTimes(2);
+  });
+
+  it('a held status read that answers late without the record does not erase the confirmation', async () => {
+    const { P, retry } = await unknownThenRetryHeld();
+    const late = deferred<ApiResult<ApprovalStatus>>();
+    ai.getApprovalStatus.mockImplementationOnce(() => late.promise);
+    await act(async () => { retry.resolve(fail(429, 'rate_limited')); }); // its follow-up read is held
+    await act(async () => { late.resolve(P.status([])); });              // ...and answers with no record
+    const r = P.region();
+    expect(within(r).getByText(`Approved · version ${P.v}`)).toBeInTheDocument();
+    expect(within(r).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(r).queryByRole('button', { name: `Approve version ${P.v}` })).not.toBeInTheDocument();
+  });
+
+  it('a direct success survives Hide/reopen while status reads fail', async () => {
+    const P = await beginApproval(name);
+    ai.approveVersion.mockResolvedValueOnce({ ok: true, data: { approval: P.rec(P.vid, P.v), approvalResult: 'created' } });
+    ai.getApprovalStatus.mockImplementation(async () => fail(0, 'network'));
+    await act(async () => { fireEvent.click(confirmBtn(name)); });
+    await act(async () => { fireEvent.click(within(P.panel()).getByRole('button', { name: 'Hide draft' })); });
+    await act(async () => { fireEvent.click(within(P.panel()).getByRole('button', { name: 'Open draft' })); });
+    const r = await within(P.panel()).findByRole('region', { name: 'Approval' });
+    await waitFor(() => expect(r).toHaveTextContent(`Approved version ${P.v} on`));
+    expect(r).toHaveTextContent('Approval status cannot be re-read right now.');
+    expect(r).not.toHaveTextContent('It is not shown as approved');
+  });
+
+  it('a retry rejected before any confirmation still keeps the earlier uncertainty', async () => {
+    const P = await beginApproval(name);
+    ai.approveVersion.mockResolvedValueOnce(fail(0, 'network'));
+    await act(async () => { fireEvent.click(confirmBtn(name)); });
+    ai.approveVersion.mockResolvedValueOnce(fail(429, 'rate_limited'));
+    await act(async () => { fireEvent.click(confirmBtn(name)); });
+    expect(within(P.region()).getByRole('alert')).toHaveTextContent('This retry was rejected, but your earlier approval attempt may still have succeeded');
+    expect(checkBtnT(name)).toBeInTheDocument();
+  });
+
+  it('a successful answer carrying ANOTHER version never confirms this one', async () => {
+    const P = await beginApproval(name);
+    ai.approveVersion.mockResolvedValueOnce({ ok: true, data: { approval: P.rec(P.other, P.v + 1), approvalResult: 'created' } });
+    await act(async () => { fireEvent.click(confirmBtn(name)); });
+    const r = P.region();
+    expect(within(r).queryByText(new RegExp(`Approved · version ${P.v}|Approved version ${P.v}`))).not.toBeInTheDocument();
+    expect(within(r).getByRole('alert')).toHaveTextContent(T_UNKNOWN);
+  });
+
+  it('a status read approving ANOTHER version never confirms the pending one', async () => {
+    const P = await beginApproval(name);
+    ai.approveVersion.mockResolvedValueOnce(fail(0, 'network'));
+    await act(async () => { fireEvent.click(confirmBtn(name)); });
+    ai.getApprovalStatus.mockImplementation(async () => P.status([P.rec(P.other, P.v + 1)]));
+    await act(async () => { fireEvent.click(checkBtnT(name)); });
+    expect(within(P.region()).getByRole('alert')).toHaveTextContent(T_UNKNOWN);
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch 5B final: a loading status read never hides known attempt state.
+describe.each(PANEL_NAMES)('Loading (%s): attempt state stays visible while status loads', (name) => {
+  const CHECKING = 'Checking approval status…';
+  async function heldPostThenReopenWithHeldGet() {
+    const P = await beginApproval(name);
+    const post = deferred<ApiResult<ApproveResult>>();
+    ai.approveVersion.mockImplementationOnce(() => post.promise);
+    await act(async () => { fireEvent.click(confirmBtn(name)); });
+    const get = deferred<ApiResult<ApprovalStatus>>();
+    ai.getApprovalStatus.mockImplementationOnce(() => get.promise);
+    await act(async () => { fireEvent.click(within(P.panel()).getByRole('button', { name: 'Hide draft' })); });
+    await act(async () => { fireEvent.click(within(P.panel()).getByRole('button', { name: 'Open draft' })); });
+    const panel = P.panel();
+    expect(panel).toHaveTextContent(CHECKING);
+    expect(panel).toHaveTextContent(`An approval request for version ${P.v} is still being processed.`);
+    expect(within(panel).queryByRole('button', { name: new RegExp(`Approve version ${P.v}|Confirm approval`) })).not.toBeInTheDocument();
+    expect(panel).not.toHaveTextContent(/Not approved|Approved ·|Approved version/);
+    return { P, post, get, panel };
+  }
+
+  it.each([
+    ['a lost response', fail(0, 'network')],
+    ['a 503', fail(503, 'service_unavailable')],
+  ])('POST held, reopened with GET held, then %s: the warning and Check appear while still loading', async (_n, outcome) => {
+    const { P, post, get } = await heldPostThenReopenWithHeldGet();
+    await act(async () => { post.resolve(outcome); });
+    const panel = P.panel();
+    expect(panel).toHaveTextContent(CHECKING); // the GET is still held
+    expect(within(panel).getByRole('alert')).toHaveTextContent(`${T_UNKNOWN} for version ${P.v}`);
+    expect(within(panel).getByRole('button', { name: 'Check approval status' })).toBeInTheDocument();
+    expect(panel).not.toHaveTextContent(/Not approved|Approved ·|Approved version|still being processed/);
+    expect(within(panel).queryByRole('button', { name: new RegExp(`Approve version ${P.v}|Confirm approval`) })).not.toBeInTheDocument();
+    // The held GET answers with the exact record: resolved, nothing misleading.
+    await act(async () => { get.resolve(P.status([P.rec(P.vid, P.v)])); });
+    const r = P.region();
+    expect(within(r).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(r).getByText(`Approved · version ${P.v}`)).toBeInTheDocument();
+    expect(r).toHaveTextContent(`Approved version ${P.v} on`);
+    expect(r).not.toHaveTextContent(/Not approved|could not confirm|still being processed/);
+    expect(ai.approveVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it('the held GET answering without the record keeps the uncertainty', async () => {
+    const { P, post, get } = await heldPostThenReopenWithHeldGet();
+    await act(async () => { post.resolve(fail(0, 'network')); });
+    await act(async () => { get.resolve(P.status([])); });
+    expect(within(P.region()).getByRole('alert')).toHaveTextContent(`${T_UNKNOWN} for version ${P.v}`);
+    expect(within(P.region()).getByRole('button', { name: 'Check approval status' })).toBeInTheDocument();
+  });
+
+  it('a confirmed approval is still shown while a later read loads, and is not downgraded by it', async () => {
+    const P = await beginApproval(name);
+    ai.approveVersion.mockResolvedValueOnce(fail(0, 'network'));
+    await act(async () => { fireEvent.click(confirmBtn(name)); });
+    ai.getApprovalStatus.mockImplementation(async () => P.status([P.rec(P.vid, P.v)]));
+    await act(async () => { fireEvent.click(checkBtnT(name)); });
+    const get = deferred<ApiResult<ApprovalStatus>>();
+    ai.getApprovalStatus.mockImplementationOnce(() => get.promise);
+    await act(async () => { fireEvent.click(within(P.panel()).getByRole('button', { name: 'Hide draft' })); });
+    await act(async () => { fireEvent.click(within(P.panel()).getByRole('button', { name: 'Open draft' })); });
+    expect(P.panel()).toHaveTextContent(CHECKING);
+    expect(P.panel()).toHaveTextContent(`Approved version ${P.v} on`);
+    expect(within(P.panel()).queryByRole('alert')).not.toBeInTheDocument();
+    await act(async () => { get.resolve(P.status([])); });
+    expect(within(P.region()).getByText(`Approved · version ${P.v}`)).toBeInTheDocument();
+    expect(within(P.region()).queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+describe('Loading: attempt state never crosses artifacts', () => {
+  it('a Calendar attempt is not shown while the Notes status is loading', async () => {
+    eventCurrent = eventV2;
+    ai.getMakeNotesPreparation.mockResolvedValue({ ok: true, data: prep('make_notes', 501) });
+    ai.getStudyNote.mockResolvedValue({ ok: true, data: noteV1 });
+    const P = await beginApproval('Calendar');
+    ai.approveVersion.mockResolvedValueOnce(fail(0, 'network'));
+    await act(async () => { fireEvent.click(confirmBtn('Calendar')); });
+    expect(within(P.region()).getByRole('alert')).toHaveTextContent(T_UNKNOWN);
+    const get = deferred<ApiResult<ApprovalStatus>>();
+    ai.getApprovalStatus.mockImplementationOnce(() => get.promise);
+    await act(async () => { fireEvent.click(within(notes()).getByRole('button', { name: 'Open draft' })); });
+    const n = notes();
+    await within(n).findByText('Checking approval status…');
+    expect(within(n).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(n).queryByRole('button', { name: 'Check approval status' })).not.toBeInTheDocument();
+    expect(n).not.toHaveTextContent(/still being processed|could not confirm/);
+    await act(async () => { get.resolve(noteStatus()); });
+    expect(within(notes()).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(calendar()).getByRole('alert')).toHaveTextContent(T_UNKNOWN); // still on its own panel
   });
 });

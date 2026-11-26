@@ -5,6 +5,8 @@ import {
   generateStudyNote,
   getAnalysis,
   getEventDraft,
+  getApprovalStatus,
+  approveVersion,
   getEventDraftPreparation,
   getConsent,
   getProviderMode,
@@ -168,5 +170,39 @@ describe('B2: preparation answers must carry the expected operation kind', () =>
     expect((await getEventDraftPreparation(3, fetchOf(() => json({ ...base, action: 'add_calendar', kind: 'study_note' })))).ok).toBe(false);
     expect((await requestEventDraft(3, fetchOf(() => json({ ...base, action: 'add_calendar', kind: 'event_draft' }, 202)))).ok).toBe(true);
     expect((await requestEventDraft(3, fetchOf(() => json({ ...base, action: 'add_calendar' }, 202)))).ok).toBe(false);
+  });
+});
+
+describe('Approval API client (Batch 5B)', () => {
+  const st = (over: Record<string, unknown> = {}, elig: Record<string, unknown> = {}) => ({
+    artifactId: 5, kind: 'event_draft', currentVersionId: 12, currentVersionNumber: 2, status: 'never_approved', approvals: [],
+    eligibility: { eligible: true, reasons: [], requiredAcknowledgements: [], aiOriginFields: [], ...elig }, ...over,
+  });
+  const record = (versionId: number, versionNumber: number) => ({
+    approvalId: 1, artifactId: 5, versionId, versionNumber, approvedAt: '2026-11-25T10:00:00+00:00', approvedBy: 'workspace',
+    acknowledgedUncertain: [], aiOriginFields: [],
+  });
+  it('accepts a consistent status and rejects inconsistent ones', async () => {
+    expect((await getApprovalStatus(5, fetchOf(() => json(st())))).ok).toBe(true);
+    expect((await getApprovalStatus(5, fetchOf(() => json(st({ status: 'current_approved', approvals: [record(12, 2)] }))))).ok).toBe(true);
+    for (const bad of [
+      st({ status: 'current_approved' }),                                   // claims approved with no record
+      st({ status: 'current_approved', approvals: [record(11, 1)] }),       // only an OLDER version approved
+      st({ status: 'older_approved', approvals: [record(12, 2)] }),         // the current one IS approved
+      st({ status: 'never_approved', approvals: [record(11, 1)] }),
+      st({}, { eligible: true, reasons: [{ field: 'title', code: 'missing', message: 'x' }] }),
+      st({ artifactId: 6 }),
+      st({ approvals: [{ ...record(12, 2), approvedAt: 'yesterday' }], status: 'current_approved' }),
+    ]) {
+      expect((await getApprovalStatus(5, fetchOf(() => json(bad)))).ok).toBe(false);
+    }
+  });
+  it('posts the explicit confirmation and rejects an answer for another version', async () => {
+    const f = fetchOf(() => json({ approval: record(12, 2), approvalResult: 'created' }, 201));
+    expect((await approveVersion(5, 12, ['title'], f)).ok).toBe(true);
+    const [url, init] = (f as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe('/api/artifacts/5/approvals');
+    expect(JSON.parse(init.body)).toEqual({ versionId: 12, confirmReviewed: true, acknowledgeUncertain: ['title'] });
+    expect((await approveVersion(5, 13, [], fetchOf(() => json({ approval: record(12, 2), approvalResult: 'created' }, 201)))).ok).toBe(false);
   });
 });
