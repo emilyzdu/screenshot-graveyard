@@ -478,7 +478,12 @@ class WorkspaceRepository:
     # ----------------------------- consent_record ----------------------------
 
     def set_consent(
-        self, *, screenshot_id: int, granted: bool
+        self,
+        *,
+        screenshot_id: int,
+        granted: bool,
+        provider: str | None = None,
+        disclosure_revision: str | None = None,
     ) -> models.ConsentRecord:
         self._require_owned(models.Screenshot, screenshot_id)
         stmt = select(models.ConsentRecord).where(
@@ -492,11 +497,20 @@ class WorkspaceRepository:
                 screenshot_id=screenshot_id,
                 granted=granted,
                 granted_at=_utcnow() if granted else None,
+                provider=provider if granted else None,
+                disclosure_revision=disclosure_revision if granted else None,
             )
             self._session.add(record)
         else:
             record.granted = granted
             record.granted_at = _utcnow() if granted else None
+            if granted:
+                record.provider = provider
+                record.disclosure_revision = disclosure_revision
+            # Every grant or withdrawal is a new consent version (Batch 6A), so a
+            # result authorized against an older version is never saved, even
+            # after a withdraw-then-regrant.
+            record.version = (record.version or 0) + 1
         self._session.flush()
         return record
 
@@ -507,6 +521,64 @@ class WorkspaceRepository:
             models.ConsentRecord.screenshot_id == screenshot_id,
         )
         return self._session.scalars(stmt).one_or_none()
+
+    def get_consents_fresh(self, screenshot_ids: list[int]) -> dict[int, models.ConsentRecord | None]:
+        """Consent for ALL given OWNED screenshots in one read, bypassing the identity map.
+
+        Call after `lock_workspace()` in the same transaction (Batch 6A): every
+        consent change takes that lock too, so this read sees every earlier
+        consent commit and no later one can interleave. Any missing or foreign
+        screenshot raises the generic CrossWorkspaceError (non-disclosing).
+        """
+        ids = list(dict.fromkeys(screenshot_ids))
+        if not ids:
+            raise CrossWorkspaceError()
+        owned = set(
+            self._session.scalars(
+                select(models.Screenshot.id).where(
+                    models.Screenshot.workspace_id == self._workspace_id,
+                    models.Screenshot.id.in_(ids),
+                )
+            )
+        )
+        if owned != set(ids):
+            raise CrossWorkspaceError()
+        stmt = (
+            select(models.ConsentRecord)
+            .where(
+                models.ConsentRecord.workspace_id == self._workspace_id,
+                models.ConsentRecord.screenshot_id.in_(ids),
+            )
+            .execution_options(populate_existing=True)
+        )
+        found = {r.screenshot_id: r for r in self._session.scalars(stmt)}
+        return {sid: found.get(sid) for sid in ids}
+
+    # ------------------------------- ai_dispatch ------------------------------
+    def add_dispatch(self, *, operation_id: int, screenshot_id: int, consent_version: int) -> models.AIDispatch:
+        self._require_owned(models.Operation, operation_id)
+        row = models.AIDispatch(
+            workspace_id=self._workspace_id,
+            operation_id=operation_id,
+            screenshot_id=screenshot_id,
+            consent_version=consent_version,
+            state="dispatched",
+        )
+        self._session.add(row)
+        self._session.flush()
+        return row
+
+    def list_dispatches(self, operation_id: int) -> list[models.AIDispatch]:
+        stmt = (
+            select(models.AIDispatch)
+            .where(
+                models.AIDispatch.workspace_id == self._workspace_id,
+                models.AIDispatch.operation_id == operation_id,
+            )
+            .order_by(models.AIDispatch.id)
+            .execution_options(populate_existing=True)
+        )
+        return list(self._session.scalars(stmt))
 
     # ------------------------------- operation -------------------------------
 

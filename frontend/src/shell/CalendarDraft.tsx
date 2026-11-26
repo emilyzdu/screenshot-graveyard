@@ -58,7 +58,7 @@ export function CalendarDraft({
 }: Props) {
   const canStart = chosen && !readOnly;
   const id = screenshot.screenshotId;
-  const { state, busy, fake, lookup, onPrepare, read, signal } = usePreparation({
+  const { state, busy, fake, available, lookup, onPrepare, read, signal } = usePreparation({
     screenshotId: id,
     action: 'add_calendar',
     providerMode,
@@ -117,14 +117,14 @@ export function CalendarDraft({
           <p>
             <Icon name="check" size={15} /> <b>Ready to prepare.</b> Turn it into a calendar event draft.
           </p>
-          <Button size="sm" variant="primary" disabled={busy || !fake} onClick={() => void onPrepare()}>
+          <Button size="sm" variant="primary" disabled={busy || !available} onClick={() => void onPrepare()}>
             Prepare event draft
           </Button>
           <p className="sg-muted">
             {fake
               ? 'Creates a simulated event draft with the Fake AI and saves it to your workspace. It does not read dates or times from your screenshot. Nothing is added to Google Calendar or any other app.'
               : providerMode === 'openai'
-                ? 'Preparing drafts is turned off with a real AI provider until a safety fix ships.'
+                ? 'Sends this screenshot to OpenAI to draft an event from what it shows, and saves the draft to your workspace. The AI can misread dates and times: check every field before you rely on it. Nothing is added to Google Calendar or any other app.'
                 : 'The AI provider could not be confirmed, so preparing is unavailable.'}
           </p>
         </div>
@@ -160,7 +160,7 @@ export function CalendarDraft({
         <div className="sg-revive__row" role="alert">
           <span>{state.text}</span>
           {state.canRetry && canStart && (
-            <Button size="sm" disabled={busy || !fake} onClick={() => void onPrepare()}>Try again</Button>
+            <Button size="sm" disabled={busy || !available} onClick={() => void onPrepare()}>Try again</Button>
           )}
         </div>
       )}
@@ -169,7 +169,7 @@ export function CalendarDraft({
         <div className="sg-revive__row" role="alert">
           <span>Preparation failed. {describeFailure(state.prep.errorDetail)}</span>
           {canStart ? (
-            <Button size="sm" disabled={busy || !fake} onClick={() => void onPrepare()}>Retry preparation</Button>
+            <Button size="sm" disabled={busy || !available} onClick={() => void onPrepare()}>Retry preparation</Button>
           ) : (
             <span className="sg-muted">
               {readOnly ? 'Resurrect this screenshot to prepare a new draft.' : 'Choose Add to Calendar to try again.'}
@@ -313,7 +313,24 @@ function EventDraftBody({ draft, prep, screenshotId }: { draft: EventDraftVersio
             : 'Simulated draft: the Fake AI did not read your screenshot. No date, time, time zone or location was extracted from the image.'}
         </p>
       )}
+      {!simulated && provider !== 'fake' && aiVersion && (
+        <p className="sg-draft__simulated" role="note">
+          AI-extracted draft: values were read from your screenshot by AI and can be wrong. Anything the AI could not
+          read is marked Missing; nothing was filled in for you. Check every value before relying on it.
+        </p>
+      )}
       <FieldHistoryNotice origins={draft.fieldOrigins} />
+      {(c.otherEvents?.length ?? 0) > 0 && (
+        <div className="sg-uncertain" role="note" aria-label="Other events in this screenshot">
+          <p>
+            This screenshot also shows {c.otherEvents!.length === 1 ? 'another event' : `${c.otherEvents!.length} other events`} that
+            this draft does not include:
+          </p>
+          <ul>
+            {c.otherEvents!.map((label, i) => <li key={i}>{label}</li>)}
+          </ul>
+        </div>
+      )}
       <dl className="sg-facts">
         {rows.map(([label, field, value]) => (
           <div key={field} className="sg-facts__pair">

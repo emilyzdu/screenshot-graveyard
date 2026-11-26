@@ -244,13 +244,25 @@ describe('Add to Calendar: prepare, persist, reopen', () => {
     expect(within(region()).getByText('AI-generated draft · can be wrong')).toBeInTheDocument();
   });
 
-  it('with a real provider mode Prepare stays disabled and says why', async () => {
+  it('with a real provider Prepare says it sends the screenshot to OpenAI, then sends one request', async () => {
     ai.getProviderMode.mockResolvedValue({ ok: true, data: 'openai' });
     render(<LiveWorkspace />);
     await screen.findByRole('article', { name: 'poster.png' });
     const btn = await chooseCalendar();
+    expect(btn).toBeEnabled();
+    expect(within(region()).getByText(/Sends this screenshot to OpenAI to draft an event.*Nothing is added to Google Calendar/)).toBeInTheDocument();
+    ai.requestEventDraft.mockResolvedValue({ ok: true, data: prep(1) });
+    await act(async () => { fireEvent.click(btn); });
+    expect(ai.requestEventDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it('while the provider is unknown Prepare stays disabled', async () => {
+    ai.getProviderMode.mockResolvedValue(fail(503, 'service_unavailable'));
+    render(<LiveWorkspace />);
+    await screen.findByRole('article', { name: 'poster.png' });
+    const btn = await chooseCalendar();
     expect(btn).toBeDisabled();
-    expect(within(region()).getByText(/turned off with a real AI provider/)).toBeInTheDocument();
+    expect(within(region()).getByText(/could not be confirmed, so preparing is unavailable/)).toBeInTheDocument();
     fireEvent.click(btn);
     expect(ai.requestEventDraft).not.toHaveBeenCalled();
   });
@@ -535,5 +547,53 @@ describe('B1: readOnly always wins over canStart', () => {
     expect(screen.queryByRole('button', { name: /Prepare|Retry|Try again/ })).not.toBeInTheDocument();
     expect(presence).toEqual([lookup.ok ? 'present' : 'none']);
     expect(ai.requestEventDraft).not.toHaveBeenCalled();
+  });
+});
+
+describe('Batch 6A: real-provider calendar drafts', () => {
+  const real = (content: Partial<EventDraftVersion['content']>): EventDraftVersion => ({
+    ...simulated(601, [1]),
+    content: {
+      title: 'Robotics club meeting', startDate: '2026-12-08', startTime: '15:00', endDate: '2026-12-08', endTime: '16:30',
+      allDay: false, timeZone: 'Europe/London', location: 'Room 4.12', description: null,
+      missingFields: ['description'], uncertainFields: ['location'], references: [1], ...content,
+    },
+  });
+  async function openReal(version: EventDraftVersion) {
+    ai.getProviderMode.mockResolvedValue({ ok: true, data: 'openai' });
+    ai.getEventDraftPreparation.mockResolvedValue({ ok: true, data: prep(1, { status: 'uncertain', artifactId: 601, provider: 'openai' }) });
+    ai.getEventDraft.mockResolvedValue({ ok: true, data: version });
+    render(<LiveWorkspace />);
+    await screen.findByRole('article', { name: 'poster.png' });
+    await select('poster.png');
+    await within(region()).findByText('Draft ready');
+    await act(async () => { fireEvent.click(within(region()).getByRole('button', { name: 'Open draft' })); });
+    return within(region()).findByRole('article', { name: /Event draft:/ });
+  }
+
+  it('says the values were read by AI and can be wrong, never "simulated"', async () => {
+    const body = await openReal(real({}));
+    expect(body).toHaveTextContent('AI-extracted draft: values were read from your screenshot by AI and can be wrong.');
+    expect(body).not.toHaveTextContent(/Simulated draft|Fake AI did not read/);
+    expect(within(region()).getByText('AI-generated draft · can be wrong')).toBeInTheDocument();
+  });
+
+  it('lists the other events the screenshot shows that this draft does not include', async () => {
+    await openReal(real({ otherEvents: ['Robot showcase · Jan 12', 'Lab tour · 2026-12-15'] }));
+    const note = within(region()).getByRole('note', { name: 'Other events in this screenshot' });
+    expect(note).toHaveTextContent('This screenshot also shows 2 other events that this draft does not include:');
+    expect(within(note).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Robot showcase · Jan 12', 'Lab tour · 2026-12-15']);
+  });
+
+  it('a date shown without a year stays Missing and is quoted from the screenshot', async () => {
+    await openReal(real({
+      startDate: null, startTime: null, endDate: null, endTime: null, timeZone: null,
+      description: 'Date shown: Fri 5 Dec (no full date with a year was shown).',
+      missingFields: ['start_date', 'start_time', 'end_date', 'end_time', 'time_zone'], uncertainFields: [],
+    }));
+    const body = within(region()).getByRole('article', { name: /Event draft:/ });
+    expect(body).toHaveTextContent('Date shown: Fri 5 Dec (no full date with a year was shown).');
+    expect(within(body).getAllByText('Missing').length).toBeGreaterThanOrEqual(5);
+    expect(within(region()).queryByRole('note', { name: 'Other events in this screenshot' })).not.toBeInTheDocument();
   });
 });

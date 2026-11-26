@@ -92,6 +92,17 @@ def _build_api_router() -> APIRouter:
         """Expose only the active public provider mode, never configuration."""
         return ProviderModeResponse(mode=config.AI_PROVIDER)
 
+    @router.get("/ai/disclosure")
+    def ai_disclosure() -> dict:
+        """The AI processing disclosure the user must see before granting consent.
+
+        Public text only. A grant must echo its ``provider`` and ``revision``
+        (P1-A); the server never accepts a client-chosen provider.
+        """
+        from app.ai.disclosure import current_disclosure
+
+        return current_disclosure().as_dict()
+
     return router
 
 

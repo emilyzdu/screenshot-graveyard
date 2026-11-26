@@ -58,7 +58,7 @@ export function MakeNotesDraft({
 }: Props) {
   const canStart = chosen && !readOnly;
   const id = screenshot.screenshotId;
-  const { state, busy, fake, lookup, onPrepare, read, signal } = usePreparation({
+  const { state, busy, fake, available, lookup, onPrepare, read, signal } = usePreparation({
     screenshotId: id,
     action: 'make_notes',
     providerMode,
@@ -116,14 +116,14 @@ export function MakeNotesDraft({
           <p>
             <Icon name="check" size={15} /> <b>Ready to prepare.</b> Turn it into study notes.
           </p>
-          <Button size="sm" variant="primary" disabled={busy || !fake} onClick={() => void onPrepare()}>
+          <Button size="sm" variant="primary" disabled={busy || !available} onClick={() => void onPrepare()}>
             Prepare draft
           </Button>
           <p className="sg-muted">
             {fake
               ? 'Creates a simulated notes draft with the Fake AI and saves it to your workspace. Nothing is approved, exported or sent to another app.'
               : providerMode === 'openai'
-                ? 'Preparing drafts is turned off with a real AI provider until a safety fix ships.'
+                ? 'Sends this screenshot to OpenAI to draft study notes from what it shows, and saves the draft to your workspace. The AI can misread: check the notes against your screenshot. Nothing is approved, exported or sent to another app.'
                 : 'The AI provider could not be confirmed, so preparing is unavailable.'}
           </p>
         </div>
@@ -159,7 +159,7 @@ export function MakeNotesDraft({
         <div className="sg-revive__row" role="alert">
           <span>{state.text}</span>
           {state.canRetry && canStart && (
-            <Button size="sm" disabled={busy || !fake} onClick={() => void onPrepare()}>Try again</Button>
+            <Button size="sm" disabled={busy || !available} onClick={() => void onPrepare()}>Try again</Button>
           )}
         </div>
       )}
@@ -168,7 +168,7 @@ export function MakeNotesDraft({
         <div className="sg-revive__row" role="alert">
           <span>Preparation failed. {describeFailure(state.prep.errorDetail)}</span>
           {canStart ? (
-            <Button size="sm" disabled={busy || !fake} onClick={() => void onPrepare()}>Retry preparation</Button>
+            <Button size="sm" disabled={busy || !available} onClick={() => void onPrepare()}>Retry preparation</Button>
           ) : (
             <span className="sg-muted">
               {readOnly ? 'Resurrect this screenshot to prepare a new draft.' : 'Choose Make Notes to try again.'}
@@ -300,6 +300,12 @@ function DraftBody({ note, prep, screenshotId }: { note: StudyNoteVersion; prep:
           {!aiVersion
             ? 'Simulated draft: sections marked "Fake AI" were written by the Fake AI without reading your screenshot. Only sections marked "edited by you" came from you.'
             : 'Simulated draft: the Fake AI wrote placeholder text without reading your screenshot. None of this was extracted from the image.'}
+        </p>
+      )}
+      {!simulated && provider !== 'fake' && aiVersion && (
+        <p className="sg-draft__simulated" role="note">
+          AI-written notes: drafted by AI from your screenshot and not yet checked by you. It can misread or leave
+          things out; anything it could not read is listed under Uncertain points.
         </p>
       )}
       <FieldHistoryNotice origins={note.fieldOrigins} />

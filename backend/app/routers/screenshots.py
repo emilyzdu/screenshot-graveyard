@@ -265,6 +265,7 @@ def build_screenshots_router() -> APIRouter:
                     "uncertain": analysis.uncertain,
                     "epitaph": analysis.epitaph_text,
                     "epitaphOrigin": analysis.epitaph_origin,
+                    "epitaphProvider": analysis.epitaph_provider,
                 }
             ),
         }

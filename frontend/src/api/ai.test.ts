@@ -88,6 +88,17 @@ describe('AI API client', () => {
     expect(r.ok && r.data.epitaph.uncertain).toBe(true);
   });
 
+  it('Batch 6A: parses an AI next-step suggestion and ignores anything unrecognised', async () => {
+    const body = (suggestedAction: unknown) => ({
+      screenshotId: 4,
+      classification: { category: 'Reference/Document', confidence: 0.8, uncertain: false, versionNumber: 1, origin: 'ai_generate', suggestedAction },
+      epitaph: { text: 'T', visibleFacts: 'F', inferredIntent: null, uncertain: false, versionNumber: 1, origin: 'ai_generate' },
+    });
+    for (const [given, expected] of [['add_calendar', 'add_calendar'], ['make_notes', 'make_notes'], [null, null], [undefined, null], ['buy_it', null], [5, null]] as const) {
+      const r = await getAnalysis(4, fetchOf(() => json(body(given))));
+      expect(r.ok && r.data.classification.suggestedAction).toBe(expected);
+    }
+  });
   it('sends analysis edits in the wire format the server expects', async () => {
     const f = fetchOf(() => json({}, 400));
     await editAnalysis(2, { category: 'Study/Knowledge', epitaphText: 'mine' }, f);
@@ -143,6 +154,15 @@ describe('Calendar event draft API client (Batch 4B)', () => {
     expect(lookupInit.method).toBe('GET');
   });
 
+  it('Batch 6A: parses the other events a screenshot shows, and rejects malformed ones', async () => {
+    const ok = await getEventDraft(8, fetchOf(() => json(eventBody({}, { other_events: ['Lab · 2026-12-03'] }))));
+    expect(ok.ok && ok.data.content.otherEvents).toEqual(['Lab · 2026-12-03']);
+    const absent = await getEventDraft(8, fetchOf(() => json(eventBody())));
+    expect(absent.ok && absent.data.content.otherEvents).toEqual([]);
+    for (const bad of ['Lab', [1], [''], Array.from({ length: 11 }, () => 'x')]) {
+      expect((await getEventDraft(8, fetchOf(() => json(eventBody({}, { other_events: bad }))))).ok).toBe(false);
+    }
+  });
   it('parses a simulated draft with every unknown field kept empty', async () => {
     const r = await getEventDraft(8, fetchOf(() => json(eventBody())));
     expect(r.ok).toBe(true);

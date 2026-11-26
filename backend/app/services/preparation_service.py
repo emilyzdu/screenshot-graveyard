@@ -6,9 +6,10 @@ those pipelines lack for a per-screenshot "Prepare" action:
 
 * lifecycle eligibility: the screenshot must be owned AND active (the Study
   Note selection policy does not look at archive state);
-* a real-provider fail-closed guard: preparation runs only while the
-  configured provider is the deterministic fake, because the consent
-  check-to-dispatch race (tasks.md 7.1) is still open;
+* a provider guard: preparation runs with the configured provider (``fake``
+  or ``openai``; Batch 6A closed the consent check-to-dispatch race, tasks.md
+  7.1). The worker refuses to run if the provider changed after acceptance, so
+  a request accepted as simulated is never sent to a real provider;
 * per-(screenshot, action) idempotency: a durable key on the existing
   ``operation.idempotency_key`` column, found-or-created under the workspace
   write lock, so repeated clicks, retries and concurrent requests reuse one
@@ -45,8 +46,9 @@ OPERATION_KIND_BY_ACTION = {
     ACTION_ADD_CALENDAR: "event_draft",
 }
 SUPPORTED_ACTIONS = frozenset(OPERATION_KIND_BY_ACTION)
-# The only provider preparation may run with until the consent-dispatch fix ships.
-PERMITTED_PROVIDERS = frozenset({"fake"})
+# Providers preparation may run with (Batch 6A: the consent-dispatch boundary
+# in AIDispatchService now guards every adapter call).
+PERMITTED_PROVIDERS = frozenset({"fake", "openai"})
 
 
 class PreparationError(Exception):

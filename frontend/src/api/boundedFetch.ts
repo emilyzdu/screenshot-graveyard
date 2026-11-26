@@ -93,3 +93,17 @@ export function boundedFetch(timeoutMs: number, outer?: AbortSignal): typeof fet
     }
   };
 }
+/**
+ * Batch 6A D2: settle `work` within `timeoutMs` no matter how it is carried out.
+ * `boundedFetch` bounds the transport; this also bounds whatever wraps it, so a
+ * read that never settles still ends as a rejection the caller can retry. The
+ * timer is always cleared once either side settles; a late answer is dropped.
+ */
+export function withDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(abortError()), timeoutMs);
+  });
+  work.catch(() => {}); // a late rejection after the deadline is not unhandled
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}

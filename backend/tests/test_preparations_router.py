@@ -31,6 +31,7 @@ from app.ratelimit import TokenBucketRateLimiter
 from app.services.consent_service import ConsentRequiredError
 from app.services.operation_service import OperationServiceUnavailableError
 from app.services.preparation_service import PreparationService, idempotency_key
+from tests.consent_helpers import grant_body
 
 TRUSTED = config.TRUSTED_ORIGINS[0]
 HDRS = {"Origin": TRUSTED, "X-Requested-With": "fetch"}
@@ -100,7 +101,7 @@ def upload(c, color=(10, 20, 30), consent=True) -> int:
     r = c.post("/api/screenshots", headers=HDRS, files=[("files", ("s.png", png(color), "image/png"))])
     sid = r.json()["results"][0]["screenshotId"]
     if consent:
-        assert c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True}).status_code == 200
+        assert c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body()).status_code == 200
     return sid
 
 
@@ -425,17 +426,35 @@ def test_csrf_header_is_required(env):
     assert counts(eng)["operations"] == 0
 
 
-def test_real_provider_fails_closed_at_the_route(env, monkeypatch):
+def test_real_provider_preparation_is_accepted_and_recorded_as_real(env, monkeypatch):
+    """Batch 6A: the consent-dispatch boundary now guards every adapter call, so a
+    real provider may prepare drafts. The provider is recorded with the request."""
     make_client, eng, adapter = env
     c = make_client()
-    sid = upload(c)
     monkeypatch.setattr(config, "AI_PROVIDER", "openai")
+    sid = upload(c)  # consent granted while the real provider is active (provider-scoped)
     r = prepare(c, sid)
-    assert r.status_code == 409 and r.json()["error"]["code"] == "provider_not_permitted"
-    assert counts(eng)["operations"] == 0 and adapter.calls == 0
+    assert r.status_code in (200, 202), r.text
+    assert r.json()["provider"] == "openai"
+    assert counts(eng)["operations"] == 1 and adapter.calls == 1  # the injected (mocked) adapter ran
 
 
-def test_real_provider_fails_closed_in_the_worker(env, deferred_job, monkeypatch):
+def test_a_real_provider_request_never_runs_after_a_switch_to_fake(env, monkeypatch, request):
+    held_fixture = "held_event_job" if "calls" == "event_calls" else "deferred_job"
+    held, real = request.getfixturevalue(held_fixture)
+    make_client, eng, adapter = env
+    c = make_client()
+    monkeypatch.setattr(config, "AI_PROVIDER", "openai")
+    sid = upload(c)  # consent granted while the real provider is active (provider-scoped)
+    op_id = prepare(c, sid).json()["operationId"]
+    monkeypatch.setattr(config, "AI_PROVIDER", "fake")  # reconfigured after acceptance
+    real(*held[0])
+    op = c.get(f"/api/operations/{op_id}").json()
+    assert op["status"] == "failed" and op["errorDetail"] == "AI processing unavailable"
+    assert adapter.calls == 0 and counts(eng)["artifacts"] == 0
+
+
+def test_a_request_accepted_as_simulated_never_runs_with_a_real_provider(env, deferred_job, monkeypatch):
     make_client, eng, adapter = env
     held, real = deferred_job
     c = make_client()

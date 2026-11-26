@@ -44,6 +44,7 @@ from app.services.event_draft_service import EventDraftService
 from app.services.preparation_service import (
     ACTION_ADD_CALENDAR,
     PERMITTED_PROVIDERS,
+    provider_from_key,
     Preparation,
     PreparationNotActiveError,
     PreparationNotFoundError,
@@ -132,13 +133,19 @@ def _run_guarded(workspace_id: int, screenshot_id: int, operation_id: int, gener
     makes exactly one adapter call and persists the draft atomically.
     """
     try:
-        # Fail closed if the process was reconfigured for a real provider.
-        if config.AI_PROVIDER not in PERMITTED_PROVIDERS:
-            _fail(workspace_id, operation_id, "AI processing unavailable")
-            return
         session = get_session()
         try:
-            shot = WorkspaceRepository(session, workspace_id).get_screenshot(screenshot_id)
+            repo = WorkspaceRepository(session, workspace_id)
+            # Fail closed if the provider changed after acceptance: a request
+            # accepted (and shown) as simulated is never sent to a real provider,
+            # and a real-provider request never silently becomes simulated.
+            op = repo.get_operation(operation_id)
+            recorded = provider_from_key(op.idempotency_key) if op is not None else None
+            if config.AI_PROVIDER not in PERMITTED_PROVIDERS or recorded != config.AI_PROVIDER:
+                session.close()
+                _fail(workspace_id, operation_id, "AI processing unavailable")
+                return
+            shot = repo.get_screenshot(screenshot_id)
             if shot is None:
                 session.close()
                 _fail(workspace_id, operation_id, "Not found")
@@ -181,7 +188,7 @@ def build_preparations_router() -> APIRouter:
             except PreparationProviderBlockedError:
                 return JSONResponse(status_code=409, content=_error_body(
                     "provider_not_permitted",
-                    "Preparation is disabled for real AI providers until the consent safety fix ships"))
+                    "Preparation is not available with the configured AI provider"))
             except (PreparationNotFoundError, ConsentScreenshotNotFoundError):
                 return JSONResponse(status_code=404, content=_error_body("not_found", "Not Found"))
             except PreparationNotActiveError:

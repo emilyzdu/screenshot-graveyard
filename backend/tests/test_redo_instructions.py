@@ -19,7 +19,7 @@ from app.ai.redo_instructions import (
     instructions_from_body,
     normalize_redo_instructions,
 )
-from app.ai.schemas import Category, ClassificationResult, EpitaphPayload, StudyNoteResult
+from app.ai.schemas import Category, ClassificationResult
 
 LIMIT = config.AI_REDO_INSTRUCTIONS_MAX_CHARS
 
@@ -144,10 +144,17 @@ class _Client:
 
 
 def _classification():
-    return ClassificationResult(
-        category=Category.STUDY_KNOWLEDGE, confidence=0.8, uncertain=False,
-        epitaph=EpitaphPayload(text="t", visible_facts="f", inferred_intent=None),
-    )
+    # The provider-facing wire shape (Batch 6A): every field present.
+    return {
+        "category": Category.STUDY_KNOWLEDGE.value, "confidence": 0.8, "uncertain": False,
+        "epitaph": {"text": "t", "visible_facts": "f", "inferred_intent": None, "uncertain": False},
+        "suggested_action": "none",
+    }
+
+
+def _note():
+    return {"topic": "T", "main_concepts": [], "extracted_code": [], "code_explanations": [],
+            "pitfalls": [], "uncertain_content": []}
 
 
 def _adapter(parsed):
@@ -186,8 +193,7 @@ def test_instructions_are_a_separate_json_quoted_untrusted_block_after_the_image
 
 
 def test_study_note_guidance_comes_after_all_images_and_references_still_enforced():
-    note = StudyNoteResult(topic="T", references=[5, 9])
-    adapter, client = _adapter(note)
+    adapter, client = _adapter(_note())
     out = adapter.study_note(
         [(5, b"a", "image/png"), (9, b"b", "image/png")], instructions="  be concise  "
     )
@@ -195,8 +201,9 @@ def test_study_note_guidance_comes_after_all_images_and_references_still_enforce
     types = [b["type"] for b in _user_blocks(client.responses.calls[0])]
     assert types == ["input_text", "input_image", "input_text", "input_image", "input_text"]
     assert json.loads(_user_blocks(client.responses.calls[0])[-1]["text"].split(": ", 1)[1]) == "be concise"
-    # A model that returns the wrong order is still rejected despite the guidance.
-    bad, _ = _adapter(StudyNoteResult(topic="T", references=[9, 5]))
+    # References are assigned by the backend; a model that tries to supply them
+    # (in any order) is rejected despite the guidance.
+    bad, _ = _adapter({**_note(), "references": [9, 5]})
     from app.ai.adapter import AIAdapterError
     with pytest.raises(AIAdapterError, match="failed validation"):
         bad.study_note([(5, b"a", "image/png"), (9, b"b", "image/png")], instructions="x")

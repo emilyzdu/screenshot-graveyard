@@ -6,6 +6,8 @@ const m = vi.hoisted(() => ({
   listStudyNotes: vi.fn(),
   getConsent: vi.fn(),
   setConsent: vi.fn(),
+  // Batch 6A (P1-A): the server's disclosure (Fake by default; real-mode tests override it).
+  getDisclosure: vi.fn(async () => ({ ok: true as const, data: { provider: 'fake' as const, revision: 'fake-test-rev', text: 'This development build uses the Fake AI adapter. Nothing is sent to an external AI provider, and the result is placeholder text that does not read your screenshot.' } })),
   generateStudyNote: vi.fn(),
   getOperation: vi.fn(),
   getStudyNote: vi.fn(),
@@ -110,7 +112,7 @@ describe('StudyNotesPanel: consent review', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /authorize simulated demo processing for 1 screenshot/i }));
     await waitFor(() => expect(m.setConsent).toHaveBeenCalledTimes(1));
-    expect(m.setConsent).toHaveBeenCalledWith(2, true); // only the ungranted one
+    expect(m.setConsent).toHaveBeenCalledWith(2, true, expect.any(Function), expect.objectContaining({ provider: 'fake', revision: 'fake-test-rev' })); // only the ungranted one
     await waitFor(() => expect(screen.getByRole('button', { name: /generate study note/i })).toBeEnabled());
   });
 });

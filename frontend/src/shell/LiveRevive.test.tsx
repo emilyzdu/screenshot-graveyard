@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Analysis, ApiResult, Operation, ProviderMode, Accepted } from '../api/ai';
+import type { Analysis, ApiResult, Operation, ProviderMode, Accepted, Disclosure } from '../api/ai';
 import type { ListResult, Screenshot } from '../api/client';
 
 // Batch 3A: consent + Revive + classification in the Gothic Live Workspace.
@@ -19,6 +19,8 @@ const ai = vi.hoisted(() => ({
   getProviderMode: vi.fn<() => Promise<ApiResult<ProviderMode>>>(),
   getConsent: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<boolean>>>(),
   setConsent: vi.fn<(id: number, granted: boolean, f?: typeof fetch) => Promise<ApiResult<boolean>>>(),
+  // Batch 6A (P1-A): the server's disclosure (Fake by default; real-mode tests override it).
+  getDisclosure: vi.fn<(f?: typeof fetch) => Promise<ApiResult<Disclosure>>>(async () => ({ ok: true as const, data: { provider: 'fake' as const, revision: 'fake-test-rev', text: 'This development build uses the Fake AI adapter. Nothing is sent to an external AI provider, and the result is placeholder text that does not read your screenshot.' } })),
   classifyScreenshot: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Accepted>>>(),
   getOperation: vi.fn<(opId: number, f?: typeof fetch) => Promise<ApiResult<Operation>>>(),
   getAnalysis: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Analysis>>>(),
@@ -51,8 +53,8 @@ const shot: Screenshot = {
 };
 const analysis: Analysis = {
   screenshotId: 42,
-  classification: { category: 'Study/Knowledge', confidence: 0.82, uncertain: false, versionNumber: 1, origin: 'ai_generate' },
-  epitaph: { text: 'Saved to study later (synthetic fixture).', visibleFacts: 'Synthetic adapter does not interpret image content.', inferredIntent: null, uncertain: false, versionNumber: 1, origin: 'ai_generate' },
+  classification: { category: 'Study/Knowledge', confidence: 0.82, uncertain: false, versionNumber: 1, origin: 'ai_generate', provider: 'fake' },
+  epitaph: { text: 'Saved to study later (synthetic fixture).', visibleFacts: 'Synthetic adapter does not interpret image content.', inferredIntent: null, uncertain: false, versionNumber: 1, origin: 'ai_generate', provider: 'fake' },
 };
 const fail = (status: number, code: string): ApiResult<never> => ({ ok: false, status, code, message: code });
 const op = (status: Operation['status'], errorDetail: string | null = null): ApiResult<Operation> =>
@@ -73,6 +75,7 @@ beforeEach(() => {
   client.listScreenshots.mockResolvedValue({ ok: true, screenshots: [shot] });
   ai.getProviderMode.mockResolvedValue({ ok: true, data: 'fake' });
   ai.getConsent.mockResolvedValue({ ok: true, data: false });
+  ai.getDisclosure.mockResolvedValue(FAKE_DISCLOSURE);
   ai.getAnalysis.mockResolvedValue(fail(404, 'not_found'));
   ai.setConsent.mockImplementation(async (_id, granted) => ({ ok: true, data: granted }));
 });
@@ -83,6 +86,22 @@ async function openDrawer(name = 'syn.png') {
   return screen.getByRole('dialog', { name });
 }
 const revive = () => screen.getByRole('button', { name: /Revive with Fake AI|Starting…|Reviving…/ });
+// P1-A: a grant echoes exactly the disclosure the panel showed.
+const FAKE_DISCLOSURE = {
+  ok: true as const,
+  data: {
+    provider: 'fake' as const, revision: 'fake-test-rev',
+    text: 'This development build uses the Fake AI adapter. Nothing is sent to an external AI provider, and the result is placeholder text that does not read your screenshot.',
+  },
+};
+const SHOWN = expect.objectContaining({ provider: 'fake', revision: 'fake-test-rev' });
+const OPENAI_DISCLOSURE = {
+  ok: true as const,
+  data: {
+    provider: 'openai' as const, revision: 'openai-test-rev',
+    text: 'Revive sends the original image of this screenshot to OpenAI to analyze it. The app asks OpenAI not to store the response, but OpenAI may keep request data for a limited time for abuse monitoring under its own policies. The result is an AI suggestion and can be wrong.',
+  },
+};
 async function grant() {
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Allow AI processing' })); });
 }
@@ -104,7 +123,7 @@ describe('Gothic Revive: consent', () => {
     render(<LiveWorkspace />);
     await openDrawer();
     await grant();
-    expect(ai.setConsent).toHaveBeenCalledWith(42, true, expect.any(Function));
+    expect(ai.setConsent).toHaveBeenCalledWith(42, true, expect.any(Function), SHOWN);
     expect(screen.getByText('Consent: granted for this screenshot.')).toBeInTheDocument();
     expect(screen.getByText(/closing this panel does not withdraw it/)).toBeInTheDocument();
     expect(revive()).toBeEnabled();
@@ -129,7 +148,7 @@ describe('Gothic Revive: consent', () => {
     expect(revive()).toBeEnabled();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Withdraw consent' })); });
     expect(ai.setConsent).toHaveBeenCalledWith(42, false, expect.any(Function));
-    expect(screen.getByText(/Withdrawing cannot stop an analysis that already started/)).toBeInTheDocument();
+    expect(screen.getByText(/^AI consent withdrawn\. Withdrawing consent blocks every new AI request for it\. A request already sent may still complete at the AI provider; its result is not saved\.$/)).toBeInTheDocument();
     expect(revive()).toBeDisabled();
   });
 
@@ -155,27 +174,34 @@ describe('Gothic Revive: consent', () => {
     expect(ai.getOperation).not.toHaveBeenCalled();
   });
 
-  it('refuses consent and Revive when a real provider is configured, and while the provider is unknown', async () => {
+  it('with a real provider: the disclosure comes first, consent is explicit, then Revive sends one request', async () => {
     ai.getProviderMode.mockResolvedValue({ ok: true, data: 'openai' });
-    const first = render(<LiveWorkspace />);
-    await openDrawer();
-    expect(screen.getByText(/A real AI provider is configured on the server\. Revive is turned off/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Allow AI processing' })).toBeDisabled();
-    expect(revive()).toBeDisabled();
-    first.unmount();
-    // Even with consent already granted on the server, a real provider keeps Revive off.
-    ai.getConsent.mockResolvedValue({ ok: true, data: true });
-    const second = render(<LiveWorkspace />);
-    await openDrawer();
-    expect(screen.getByText('Consent: granted for this screenshot.')).toBeInTheDocument();
-    expect(revive()).toBeDisabled();
-    second.unmount();
-    ai.getConsent.mockResolvedValue({ ok: true, data: false });
+    ai.getDisclosure.mockResolvedValue(OPENAI_DISCLOSURE);
+    render(<LiveWorkspace />);
+    const d = await openDrawer();
+    expect(within(d).getByText('Real AI · OpenAI')).toBeInTheDocument();
+    expect(within(d).getByText(/Revive sends the original image of this screenshot to OpenAI to analyze it\./)).toBeInTheDocument();
+    expect(within(d).getByText(/OpenAI may keep request data for a limited time for abuse monitoring/)).toBeInTheDocument();
+    const realRevive = () => within(d).getByRole('button', { name: /Revive with AI|Starting…|Analyzing your screenshot…/ });
+    expect(realRevive()).toBeDisabled(); // no consent yet
+    expect(within(d).queryByRole('button', { name: /Revive with Fake AI/ })).not.toBeInTheDocument();
+    ai.setConsent.mockResolvedValue({ ok: true, data: true });
+    await grant();
+    expect(ai.setConsent).toHaveBeenCalledWith(42, true, expect.any(Function), expect.objectContaining({ provider: 'openai', revision: 'openai-test-rev' }));
+    expect(realRevive()).toBeEnabled();
+    ai.classifyScreenshot.mockResolvedValue(accepted);
+    ai.getOperation.mockResolvedValue(op('pending', null));
+    await act(async () => { fireEvent.click(realRevive()); });
+    expect(ai.classifyScreenshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('while the provider is unknown, neither consent nor Revive is offered', async () => {
     ai.getProviderMode.mockResolvedValue(fail(503, 'service_unavailable'));
     render(<LiveWorkspace />);
     await openDrawer();
     expect(screen.getByText(/AI provider could not be confirmed, so Revive is unavailable/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Allow AI processing' })).toBeDisabled();
+    expect(revive()).toBeDisabled();
     expect(ai.classifyScreenshot).not.toHaveBeenCalled();
   });
 });
@@ -223,7 +249,9 @@ describe('Gothic Revive: operation states', () => {
   });
 
   it.each([
-    { status: 'failed' as const, detail: 'AI processing consent required', text: /consent is missing or was withdrawn before the work started/ },
+    { status: 'failed' as const, detail: 'AI processing consent required', text: /consent is missing or was withdrawn, so nothing was saved/ },
+    { status: 'failed' as const, detail: 'AI analysis timed out', text: /did not answer in time\. Nothing was saved/ },
+    { status: 'failed' as const, detail: 'AI provider busy; try again later', text: /provider is busy right now\. Nothing was saved/ },
     { status: 'failed' as const, detail: 'AI analysis failed', text: /did not complete \(this includes timeouts\)/ },
     { status: 'uncertain' as const, detail: 'AI result uncertain', text: /not sure about this one, so no result was saved/ },
   ])('reports a terminal $status ($detail) honestly and allows a new Revive', async ({ status, detail, text }) => {
@@ -486,7 +514,7 @@ describe('Codex P1: a failed consent withdrawal never leaves Revive enabled', ()
     // Explicit, current authorization re-enables it.
     ai.setConsent.mockResolvedValue({ ok: true, data: true });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Allow AI processing' })); });
-    expect(ai.setConsent).toHaveBeenLastCalledWith(42, true, expect.any(Function));
+    expect(ai.setConsent).toHaveBeenLastCalledWith(42, true, expect.any(Function), SHOWN);
     expect(revive()).toBeEnabled();
   });
 
@@ -682,5 +710,199 @@ describe('Codex P2 (round 2): a stalled manual "Check consent" is bounded and re
     expect(signals[0].aborted).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Close details' }));
     expect(signals[0].aborted).toBe(true);
+  });
+});
+
+describe('Batch 6A P1-A: consent is bound to the disclosure the user saw', () => {
+  it('a stale disclosure is refused: the current one is shown, nothing is re-sent, a fresh click sends the new revision', async () => {
+    render(<LiveWorkspace />);
+    const d = await openDrawer();
+    expect(within(d).getByText(/uses the Fake AI adapter/)).toBeInTheDocument();
+    ai.setConsent.mockResolvedValueOnce(fail(409, 'disclosure_changed'));
+    ai.getDisclosure.mockResolvedValue({ ok: true, data: { provider: 'fake', revision: 'fake-rev-2', text: 'A revised Fake AI disclosure.' } });
+    await grant();
+    expect(ai.setConsent).toHaveBeenCalledTimes(1);
+    expect(within(d).getByText(/The AI processing disclosure changed since it was shown, so nothing was recorded/)).toBeInTheDocument();
+    expect(await within(d).findByText('A revised Fake AI disclosure.')).toBeInTheDocument();
+    expect(within(d).getByText('Consent: not granted. Nothing will be analyzed.')).toBeInTheDocument();
+    expect(ai.setConsent).toHaveBeenCalledTimes(1); // never re-submitted on its own
+    ai.setConsent.mockResolvedValueOnce({ ok: true, data: true });
+    await grant();
+    expect(ai.setConsent).toHaveBeenLastCalledWith(42, true, expect.any(Function), expect.objectContaining({ revision: 'fake-rev-2' }));
+  });
+
+  it('a disclosure for another provider than the server mode (or none) never allows a grant', async () => {
+    ai.getDisclosure.mockResolvedValue(OPENAI_DISCLOSURE); // the mode says fake
+    render(<LiveWorkspace />);
+    const d = await openDrawer();
+    expect(within(d).getByRole('button', { name: 'Allow AI processing' })).toBeDisabled();
+    expect(within(d).queryByText(/Revive sends the original image/)).not.toBeInTheDocument();
+    // C2: an explicit, retryable state, never an endless "Loading".
+    expect(within(d).getByText(/The AI provider changed while this was being checked, so consent cannot be given yet/)).toBeInTheDocument();
+    expect(within(d).queryByText('Loading the AI processing disclosure…')).not.toBeInTheDocument();
+    await grant();
+    expect(ai.setConsent).not.toHaveBeenCalled();
+  });
+
+  it('a disclosure that cannot be loaded blocks consent and can be retried', async () => {
+    ai.getDisclosure.mockResolvedValue(fail(503, 'service_unavailable'));
+    render(<LiveWorkspace />);
+    const d = await openDrawer();
+    expect(within(d).getByText(/disclosure could not be loaded, so consent cannot be given/)).toBeInTheDocument();
+    expect(within(d).getByRole('button', { name: 'Allow AI processing' })).toBeDisabled();
+    ai.getDisclosure.mockResolvedValue(FAKE_DISCLOSURE);
+    await act(async () => { fireEvent.click(within(d).getByRole('button', { name: 'Load it again' })); });
+    expect(within(d).getByRole('button', { name: 'Allow AI processing' })).toBeEnabled();
+  });
+
+  it('withdrawing never needs the disclosure', async () => {
+    ai.getConsent.mockResolvedValue({ ok: true, data: true });
+    ai.getDisclosure.mockResolvedValue(fail(503, 'service_unavailable'));
+    ai.setConsent.mockResolvedValue({ ok: true, data: false });
+    render(<LiveWorkspace />);
+    await openDrawer();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Withdraw consent' })); });
+    expect(ai.setConsent).toHaveBeenCalledWith(42, false, expect.any(Function));
+  });
+});
+
+describe('Batch 6A C2: recovering after the server switched provider', () => {
+  const OPENAI_MODE = { ok: true as const, data: 'openai' as const };
+  const FAKE_MODE = { ok: true as const, data: 'fake' as const };
+  const allow = () => screen.getByRole('button', { name: 'Allow AI processing' });
+
+  async function refusedAfterSwitch(nextMode: ApiResult<ProviderMode>, nextDisclosure: ApiResult<Disclosure>) {
+    render(<LiveWorkspace />);
+    const d = await openDrawer();
+    const mode = deferred<ApiResult<ProviderMode>>();
+    const disc = deferred<ApiResult<Disclosure>>();
+    ai.getProviderMode.mockImplementationOnce(() => mode.promise);
+    ai.getDisclosure.mockImplementationOnce(() => disc.promise);
+    ai.setConsent.mockResolvedValueOnce(fail(409, 'disclosure_changed'));
+    await grant();
+    return { d, mode, disc, finish: async () => {
+      await act(async () => { mode.resolve(nextMode); disc.resolve(nextDisclosure); });
+    } };
+  }
+
+  it('Fake -> OpenAI: the OpenAI disclosure is shown and only a fresh Allow sends its exact revision', async () => {
+    const { d, finish } = await refusedAfterSwitch(OPENAI_MODE, OPENAI_DISCLOSURE);
+    expect(within(d).getByText(/disclosure changed since it was shown, so nothing was recorded/)).toBeInTheDocument();
+    await finish();
+    expect(within(d).getByText(/Revive sends the original image of this screenshot to OpenAI/)).toBeInTheDocument();
+    expect(within(d).queryByText(/uses the Fake AI adapter/)).not.toBeInTheDocument();
+    expect(within(d).queryByText('Loading the AI processing disclosure…')).not.toBeInTheDocument();
+    expect(within(d).getByText('Real AI · OpenAI')).toBeInTheDocument();
+    expect(ai.setConsent).toHaveBeenCalledTimes(1); // nothing re-sent, nothing granted
+    expect(ai.classifyScreenshot).not.toHaveBeenCalled();
+    expect(allow()).toBeEnabled();
+    ai.setConsent.mockResolvedValueOnce({ ok: true, data: true });
+    await grant();
+    expect(ai.setConsent).toHaveBeenCalledTimes(2);
+    expect(ai.setConsent).toHaveBeenLastCalledWith(42, true, expect.any(Function),
+      expect.objectContaining({ provider: 'openai', revision: 'openai-test-rev' }));
+  });
+
+  it('OpenAI -> Fake: the Fake disclosure is shown and a fresh Allow sends it', async () => {
+    ai.getProviderMode.mockResolvedValue(OPENAI_MODE);
+    ai.getDisclosure.mockResolvedValue(OPENAI_DISCLOSURE);
+    const { d, finish } = await refusedAfterSwitch(FAKE_MODE, FAKE_DISCLOSURE);
+    await finish();
+    expect(within(d).getByText(/uses the Fake AI adapter/)).toBeInTheDocument();
+    expect(within(d).queryByText(/Revive sends the original image/)).not.toBeInTheDocument();
+    expect(within(d).getByText('Fake AI · development')).toBeInTheDocument();
+    ai.setConsent.mockResolvedValueOnce({ ok: true, data: true });
+    await grant();
+    expect(ai.setConsent).toHaveBeenLastCalledWith(42, true, expect.any(Function), SHOWN);
+  });
+
+  it('a revised disclosure with the same provider is shown and its new revision is sent', async () => {
+    const revised = { ok: true as const, data: { provider: 'fake' as const, revision: 'fake-rev-3', text: 'Revised Fake text.' } };
+    const { d, finish } = await refusedAfterSwitch(FAKE_MODE, revised);
+    await finish();
+    expect(within(d).getByText('Revised Fake text.')).toBeInTheDocument();
+    ai.setConsent.mockResolvedValueOnce({ ok: true, data: true });
+    await grant();
+    expect(ai.setConsent).toHaveBeenLastCalledWith(42, true, expect.any(Function), expect.objectContaining({ revision: 'fake-rev-3' }));
+  });
+
+  it('the provider keeps changing during recovery: an honest retryable state, never endless loading', async () => {
+    render(<LiveWorkspace />);
+    const d = await openDrawer();
+    ai.setConsent.mockResolvedValueOnce(fail(409, 'disclosure_changed'));
+    // Every round: the mode says fake, the disclosure says openai.
+    ai.getProviderMode.mockResolvedValue(FAKE_MODE);
+    ai.getDisclosure.mockResolvedValue(OPENAI_DISCLOSURE);
+    await grant();
+    await within(d).findByText(/The AI provider changed while this was being checked/);
+    expect(within(d).queryByText('Loading the AI processing disclosure…')).not.toBeInTheDocument();
+    expect(allow()).toBeDisabled();
+    // Once it settles, "Check again" recovers.
+    ai.getProviderMode.mockResolvedValue(OPENAI_MODE);
+    await act(async () => { fireEvent.click(within(d).getByRole('button', { name: 'Check again' })); });
+    expect(within(d).getByText(/Revive sends the original image of this screenshot to OpenAI/)).toBeInTheDocument();
+    expect(allow()).toBeEnabled();
+    expect(ai.setConsent).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['provider status', () => ai.getProviderMode.mockImplementationOnce(async () => fail(503, 'service_unavailable'))],
+    ['disclosure', () => ai.getDisclosure.mockImplementationOnce(async () => fail(503, 'service_unavailable'))],
+  ])('a failed %s refresh is an honest, retryable error', async (_n, breakIt) => {
+    render(<LiveWorkspace />);
+    const d = await openDrawer();
+    ai.setConsent.mockResolvedValueOnce(fail(409, 'disclosure_changed'));
+    ai.getProviderMode.mockResolvedValue(OPENAI_MODE);
+    ai.getDisclosure.mockResolvedValue(OPENAI_DISCLOSURE);
+    breakIt();
+    await grant();
+    await within(d).findByText(/disclosure could not be loaded, so consent cannot be given right now/);
+    expect(allow()).toBeDisabled();
+    await act(async () => { fireEvent.click(within(d).getByRole('button', { name: 'Load it again' })); });
+    expect(within(d).getByText(/Revive sends the original image of this screenshot to OpenAI/)).toBeInTheDocument();
+    expect(allow()).toBeEnabled();
+    expect(ai.setConsent).toHaveBeenCalledTimes(1);
+  });
+
+  it('after a refused grant nothing can be revived until a fresh Allow succeeds', async () => {
+    const { d, finish } = await refusedAfterSwitch(OPENAI_MODE, OPENAI_DISCLOSURE);
+    await finish();
+    const reviveBtn = within(d).getByRole('button', { name: /Revive with AI|Revive with Fake AI/ });
+    expect(reviveBtn).toBeDisabled();
+    await act(async () => { fireEvent.click(reviveBtn); });
+    expect(ai.classifyScreenshot).not.toHaveBeenCalled();
+  });
+
+  it('D2: the provider GET stalls after a 409 -> a retryable error; Retry recovers; only a fresh Allow grants', async () => {
+    render(<LiveWorkspace />);
+    const d = await openDrawer();
+    vi.useFakeTimers();
+    try {
+      const hung = deferred<ApiResult<ProviderMode>>();
+      ai.getProviderMode.mockImplementationOnce(() => hung.promise);
+      ai.getDisclosure.mockResolvedValueOnce(OPENAI_DISCLOSURE);  // the disclosure answers
+      ai.setConsent.mockResolvedValueOnce(fail(409, 'disclosure_changed'));
+      await grant();
+      expect(within(d).getByText('Loading the AI processing disclosure…')).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_001); });
+      expect(within(d).queryByText('Loading the AI processing disclosure…')).not.toBeInTheDocument();
+      expect(within(d).getByText(/disclosure could not be loaded, so consent cannot be given right now/)).toBeInTheDocument();
+      expect(allow()).toBeDisabled();
+      ai.getProviderMode.mockResolvedValueOnce(OPENAI_MODE);
+      ai.getDisclosure.mockResolvedValueOnce(OPENAI_DISCLOSURE);
+      await act(async () => { fireEvent.click(within(d).getByRole('button', { name: 'Load it again' })); await vi.advanceTimersByTimeAsync(0); });
+      expect(within(d).getByText(/Revive sends the original image of this screenshot to OpenAI/)).toBeInTheDocument();
+      await act(async () => { hung.resolve({ ok: true, data: 'fake' }); await vi.advanceTimersByTimeAsync(0); }); // late: ignored
+      expect(within(d).getByText('Real AI · OpenAI')).toBeInTheDocument();
+      expect(ai.setConsent).toHaveBeenCalledTimes(1);
+      expect(ai.classifyScreenshot).not.toHaveBeenCalled();
+      expect(allow()).toBeEnabled();
+    } finally {
+      vi.useRealTimers();
+    }
+    ai.setConsent.mockResolvedValueOnce({ ok: true, data: true });
+    await grant();
+    expect(ai.setConsent).toHaveBeenLastCalledWith(42, true, expect.any(Function),
+      expect.objectContaining({ provider: 'openai', revision: 'openai-test-rev' }));
   });
 });

@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.ai.schemas import Category
+from app.ai.schemas import Category, allowed_suggestion
 from app.db.repository import CrossWorkspaceError, WorkspaceRepository
 from app.services.artifact_version_service import (
     ArtifactVersionService,
@@ -70,6 +70,23 @@ class AnalysisView:
     visible_facts: str
     inferred_intent: str | None
     epitaph_uncertain: bool
+    # Batch 6A: the AI's suggested next step for THIS classification version.
+    # A user's category correction writes a new version without it.
+    suggested_action: str | None = None
+    # P2-E: the provider that generated each CURRENT version ("fake"/"openai"),
+    # or None when it was not recorded (legacy) or a person wrote it.
+    classification_provider: str | None = None
+    epitaph_provider: str | None = None
+
+
+_PROVIDERS = frozenset({"fake", "openai"})
+
+
+def _provider(origin: str, value) -> str | None:
+    """A recorded generating provider, only for AI-written versions; never guessed."""
+    if origin not in {"ai_generate", "ai_redo"}:
+        return None
+    return value if isinstance(value, str) and value in _PROVIDERS else None
 
 
 class AnalysisService:
@@ -229,6 +246,10 @@ class AnalysisService:
                 visible_facts=str(e.get("visible_facts", "")),
                 inferred_intent=e.get("inferred_intent"),
                 epitaph_uncertain=bool(e.get("uncertain", False)),
+                # P2-D: re-validated on every read (legacy rows included).
+                suggested_action=allowed_suggestion(c["category"], bool(c["uncertain"]), c.get("suggested_action")),
+                classification_provider=_provider(cv.origin, c.get("provider")),
+                epitaph_provider=_provider(ev.origin, e.get("provider")),
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise AnalysisUnavailableError("analysis service unavailable") from exc

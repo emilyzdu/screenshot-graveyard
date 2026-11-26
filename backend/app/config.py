@@ -209,6 +209,19 @@ AI_STUDY_NOTE_MAX_OUTPUT_TOKENS: int = _positive_int(
     os.environ.get("AI_STUDY_NOTE_MAX_OUTPUT_TOKENS", "2000"),
     setting="AI_STUDY_NOTE_MAX_OUTPUT_TOKENS",
 )
+AI_EVENT_DRAFT_MAX_OUTPUT_TOKENS: int = _positive_int(
+    os.environ.get("AI_EVENT_DRAFT_MAX_OUTPUT_TOKENS", "1200"),
+    setting="AI_EVENT_DRAFT_MAX_OUTPUT_TOKENS",
+)
+# Optional, only for reasoning models (e.g. ``gpt-6-luna``). Unset means the
+# ``reasoning`` parameter is not sent at all, which non-reasoning models such as
+# the default ``gpt-4.1-mini`` require. ``none`` keeps every output token for
+# the structured result.
+OPENAI_REASONING_EFFORT: str | None = (os.environ.get("OPENAI_REASONING_EFFORT") or "").strip().lower() or None
+if OPENAI_REASONING_EFFORT is not None and OPENAI_REASONING_EFFORT not in {
+    "none", "low", "medium", "high", "xhigh", "max"
+}:
+    raise RuntimeError("OPENAI_REASONING_EFFORT must be one of none, low, medium, high, xhigh, max")
 AI_PROVIDER_MAX_RETRIES: int = int(os.environ.get("AI_PROVIDER_MAX_RETRIES", "0"))
 if AI_PROVIDER_MAX_RETRIES != 0:
     raise RuntimeError("AI_PROVIDER_MAX_RETRIES must be 0; automatic retries are disabled")

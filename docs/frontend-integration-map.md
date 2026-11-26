@@ -67,7 +67,7 @@ Outcome rules:
 - Poll timeouts or outages keep the operation id (unresolved). "Check status" and reopening the drawer resume polling the same id; nothing is resubmitted.
 - Closing the drawer stops polling (the pending wait and in-flight read are aborted) and keeps the id. A classify POST in flight is not aborted (that would not cancel the server's work); its id is recorded for the next open.
 
-Consent-dispatch race (task 7.1): still present. `classification_service.py` re-checks consent after reading the bytes and then calls the adapter with no lock or consent version, so a withdrawal committed between that check and the adapter call does not stop the call. Revive is therefore disabled in the UI whenever the server reports a real provider, and the UI copy says withdrawing cannot stop an analysis already started. This is a frontend guard only; the server would still accept classify in `openai` mode.
+Consent-dispatch race (task 7.1): **resolved in Batch 6A** (see the Batch 6A section); Revive now runs with the real provider. Historical note: `classification_service.py` re-checks consent after reading the bytes and then calls the adapter with no lock or consent version, so a withdrawal committed between that check and the adapter call does not stop the call. Revive is therefore disabled in the UI whenever the server reports a real provider, and the UI copy says withdrawing cannot stop an analysis already started. This is a frontend guard only; the server would still accept classify in `openai` mode.
 
 ## Batch 3B: saved analysis on cards, Live Quiet Assistant, choose a next step
 
@@ -111,7 +111,7 @@ Requests: displaying cards sends nothing beyond the list and authorized image re
 - **Persist the choice** server-side if it must survive reload, or keep it transient and say so (current behaviour).
 - **Replace the disabled "Prepare draft"** with a real call, keep the "Chosen by you" vs "Suggested" distinction, and add Review → Approve → Deliver states with no external writes until explicit approval.
 - **Multi-select** stays constrained to one screenshot until a batch contract exists.
-- The consent-dispatch race (task 7.1) must be fixed before any real-provider Prepare.
+- The consent-dispatch race (task 7.1) must be fixed before any real-provider Prepare. (Done in Batch 6A.)
 
 ## Batch 4A: Make Notes draft (Prepare → Persist → Reopen)
 
@@ -133,7 +133,7 @@ Server rules (`services/preparation_service.py`, `routers/preparations.py`):
 
 Frontend: `shell/MakeNotesDraft.tsx` in the Live Quiet Assistant. States: checking, ready to prepare, preparing, draft ready, failed (Retry), refused (with reason), unresolved (Check status), lookup error (Check again). Lost POST responses are reconciled with the GET, never re-sent. Read-only draft view; no approve, export or delivery.
 
-Release blocker (unchanged): the consent check-to-dispatch race (tasks.md 7.1) and provider-scoped consent must be fixed before any real provider; until then the prepare route and worker fail closed for any provider other than `fake`.
+Release blocker (resolved in Batch 6A): the consent check-to-dispatch race (tasks.md 7.1) and provider-scoped consent. Preparation now runs with `fake` or `openai`; the worker fails closed if the provider changed after the request was accepted.
 
 ## Batch 4B: Calendar event draft (Add to Calendar → Prepare → Persist → Reopen)
 
@@ -203,3 +203,33 @@ Approve, under the workspace lock in one transaction: fresh artifact read → ve
 Eligibility: Notes need a verifiable history; a non-empty Uncertain section must be acknowledged. Calendar needs title, start and end dates and a known all-day value, plus start/end times and an IANA zone when timed; every uncertain field must be acknowledged. Archived sources are ineligible. `aiOriginFields` (values from AI the user has not changed) is shown in the confirmation and stored, so simulated Fake AI content is never presented as checked.
 
 Frontend: `shell/ApprovalSection.tsx` in both review panels (hidden while editing, keyed by the current version so a new version always re-reads its own status). "Approve version N" appears only for the current version of an active screenshot when the server says it is eligible; the confirmation requires "I reviewed version N" and each uncertainty acknowledgement, and says "Approval confirms this saved version only. Nothing will be sent to another app." Historical versions show their own approval read-only. After every attempt the status is re-read from the server; an unknown outcome offers "Check approval status"; a version conflict offers "Load latest version". The Crypt shows status read-only.
+
+## Batch 6A: real vision AI behind the consent-dispatch boundary
+
+Backend (no new routes):
+
+| Contract | Change |
+|---|---|
+| `GET /api/screenshots/{id}/analysis` | `classification.suggestedAction`: `"make_notes"`, `"add_calendar"` or `null`. Set only by a real-provider classification; `null` for the Fake AI and after a category edit. |
+| `GET /api/event-drafts/{id}`, edits | `content.other_events`: up to 10 short labels of other events visible in the screenshot that the draft does not cover. Not editable; carried into every new version. |
+| `POST /api/screenshots/{id}/preparations` | Accepted with `AI_PROVIDER=openai` (`provider: "openai"` recorded). The worker fails closed if the provider changed after acceptance. |
+| `GET/POST /api/screenshots/{id}/consent` | `granted` is effective for the CURRENT provider: a grant recorded under the Fake AI reads as `false` in real mode and never authorizes sending. A grant records the provider. |
+| Operation `errorDetail` | New generic values: `AI analysis timed out`, `AI provider busy; try again later`. |
+
+Consent-dispatch boundary (`services/ai_dispatch_service.py`, migration `c6a1d15a0001`): before every adapter call, one transaction under the workspace write lock checks the operation is pending and not yet dispatched, reads every source's consent fresh (granted, for the configured provider), records the heartbeat and one `ai_dispatch` row per source with the consent version. Consent writes take the same lock and bump the version. The result is saved only if every source is still granted at that version (checked inside the completion transaction); otherwise it is discarded and the operation fails with `AI processing consent required`. From the authorization commit on, a request may have been sent and cannot be recalled.
+
+Frontend: Revive, Make Notes and Add to Calendar work with the real provider, with a disclosure before consent ("Revive sends the original image of this screenshot to OpenAI…", retention caveat). Badges distinguish "Real AI · OpenAI" / "AI analysis · can be wrong" from "Fake AI · development" / "Simulated". The next step shows "Suggested by AI · can be wrong" when the AI made a suggestion, otherwise the existing rule. Calendar drafts list other visible events; AI drafts say values were read by AI and can be wrong. Withdrawal copy: new requests are blocked; a request already sent may complete; its result is not saved.
+
+### Batch 6A remediation (Codex blockers P1-A .. P2-F)
+
+| Contract | Change |
+|---|---|
+| `GET /api/ai/disclosure` (new) | `{provider, revision, text}`: the server-defined disclosure for the configured provider. `revision` is derived from the text, so any wording change is a new revision. The UI shows `text` verbatim. |
+| `POST /api/screenshots/{id}/consent` | A grant must send `{granted: true, provider, disclosureRevision}` equal to the CURRENT disclosure; otherwise 409 `disclosure_changed` with `disclosure` (the current one) and nothing is recorded. The UI shows it and waits for a new click; it never re-submits. Withdrawal (`granted: false`) needs nothing. |
+| Consent effectiveness | For a real provider, a grant counts only if it was recorded for that provider AND the current disclosure revision (checked again at every dispatch). |
+| `GET /api/screenshots/{id}/analysis` | `classification.provider`, `epitaph.provider`: the provider that generated THAT version (`fake`, `openai`, or `null` = not recorded / written by you). The UI labels results from this, never from the current mode. `suggestedAction` is re-validated on every read. |
+| `GET /api/screenshots` | `analysis.epitaphProvider` (same meaning). |
+| Suggestions | Never for `Unknown/Needs Review` or `Potentially Sensitive` (server and UI), nor for an uncertain result. |
+| Calendar extraction | The model also reports `time_zone_as_shown`. A normalized date, time or zone is kept only if its shown text supports it (a year is never inferred); unsupported values are Missing, with the shown text quoted. The shown text is itself model output, so this catches unsupported normalization, not misreading. |
+| `ai_dispatch.state` | Adds `interrupted`: stale recovery failed the operation; the request may have been sent; nothing was saved. Written in the same transaction as the operation failure. |
+| Logs | `openai*`, `httpx*`, `httpcore*` log records are redacted in-process (request bodies, data URLs, long base64, keys, bearer tokens, attached tracebacks). Logs outside this process are out of scope. |

@@ -125,10 +125,12 @@ export function usePreparation({
   // What may start a preparation RIGHT NOW. Read at invocation time, so a
   // handler captured in an earlier render (or by an unmounted panel) cannot
   // submit after the action changed. Synced before paint, like choiceAuthority.
-  const startAuthority = useRef({ canStart, fake: providerMode === 'fake' });
+  // Batch 6A: a confirmed provider (Fake or real) may start; an unconfirmed one never.
+  const available = providerMode === 'fake' || providerMode === 'openai';
+  const startAuthority = useRef({ canStart, available });
   useLayoutEffect(() => {
-    startAuthority.current = { canStart, fake: providerMode === 'fake' };
-  }, [canStart, providerMode]);
+    startAuthority.current = { canStart, available };
+  }, [canStart, available]);
 
   /** Apply a preparation the server reported, polling if it is still running. */
   const apply = useCallback(
@@ -192,7 +194,7 @@ export function usePreparation({
 
   /** True only while mounted, this action is the current choice and the provider is Fake. */
   const mayStart = () =>
-    !abortRef.current.signal.aborted && startAuthority.current.canStart && startAuthority.current.fake;
+    !abortRef.current.signal.aborted && startAuthority.current.canStart && startAuthority.current.available;
   const onPrepare = () => {
     if (!mayStart()) return Promise.resolve(); // stale handler: the action or screenshot changed
     return guarded(async () => {
@@ -220,5 +222,5 @@ export function usePreparation({
   /** A bounded read tied to this panel's lifetime. */
   const read = () => boundedFetch(DRAFT_READ_TIMEOUT_MS, abortRef.current.signal);
 
-  return { state, busy, fake: providerMode === 'fake', lookup, onPrepare, read, signal };
+  return { state, busy, fake: providerMode === 'fake', available, lookup, onPrepare, read, signal };
 }

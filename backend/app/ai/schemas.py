@@ -97,6 +97,28 @@ class ClassificationResult(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     uncertain: bool = False
     epitaph: EpitaphPayload
+    # Batch 6A: the AI's suggested next step, grounded in what the screenshot
+    # shows (e.g. a visible event date -> add_calendar). Advisory only; None when
+    # nothing fits or the adapter makes no suggestion (the Fake AI never does).
+    suggested_action: Literal["make_notes", "add_calendar"] | None = None
+
+
+# Batch 6A (P2-D): categories for which NO next step may be suggested, by AI or
+# rule. Mirrors the frontend rule (nextAction.ts): an unknown classification
+# must be checked by the user, and a possibly sensitive one is never pushed
+# toward any action.
+SUGGESTION_BLOCKED_CATEGORIES = frozenset({"Unknown/Needs Review", "Potentially Sensitive"})
+AI_SUGGESTED_ACTIONS = frozenset({"make_notes", "add_calendar"})
+
+
+def allowed_suggestion(category, uncertain: bool, action) -> str | None:
+    """The AI suggestion to keep, or None. Applied when persisting AND reading."""
+    cat = category.value if isinstance(category, Category) else category
+    if uncertain or action not in AI_SUGGESTED_ACTIONS:
+        return None
+    if cat not in {c.value for c in Category} or cat in SUGGESTION_BLOCKED_CATEGORIES:
+        return None
+    return action
 
 
 class StudyNoteResult(BaseModel):
@@ -208,6 +230,17 @@ class EventDraftResult(BaseModel):
     missing_fields: list[EventDraftField] = Field(default_factory=list)
     uncertain_fields: list[EventDraftField] = Field(default_factory=list)
     references: list[StrictInt] = Field(min_length=1)
+    # Batch 6A: other events visible in the same screenshot that this draft does
+    # NOT cover (short labels, e.g. "Lab meeting · 2026-12-03"). Shown to the
+    # user so a multi-event screenshot is never silently reduced to one event.
+    other_events: list[str] = Field(default_factory=list, max_length=10)
+
+    @field_validator("other_events")
+    @classmethod
+    def _short_labels(cls, v: list[str]) -> list[str]:
+        if any(not isinstance(x, str) or not x.strip() or len(x) > 200 for x in v):
+            raise ValueError("other_events must be short non-empty labels")
+        return [x.strip() for x in v]
 
     @field_validator("start_date", "end_date")
     @classmethod

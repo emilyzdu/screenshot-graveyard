@@ -33,6 +33,7 @@ from app.services.consent_service import (
     ScreenshotNotFoundError,
 )
 from app.ai.schemas import Category, ClassificationResult, EpitaphPayload
+from tests.consent_helpers import current_disclosure
 
 
 def png(color=(3, 6, 9)) -> bytes:
@@ -100,7 +101,7 @@ def test_granted_consent_allows_adapter_and_is_scoped_to_screenshot(ctx):
     sid = _upload(s, store, wa)
     other = _upload(s, store, wa, data=png((1, 1, 1)))
     svc = ConsentService(s, wa)
-    svc.record_consent(sid, True)
+    svc.record_consent(sid, True, disclosure=current_disclosure())
     adapter = RecordingAdapter()
     # Consent on `sid` authorizes the adapter for `sid`.
     result = svc.run_with_consent(sid, lambda: adapter.classify_and_epitaph(png(), "image/png"))
@@ -117,7 +118,7 @@ def test_consent_withdrawal_reblocks(ctx):
     s, store, wa, _ = ctx
     sid = _upload(s, store, wa)
     svc = ConsentService(s, wa)
-    svc.record_consent(sid, True)
+    svc.record_consent(sid, True, disclosure=current_disclosure())
     assert svc.has_consent(sid) is True
     svc.record_consent(sid, False)  # explicit withdrawal
     assert svc.has_consent(sid) is False
@@ -150,7 +151,7 @@ def test_consent_is_workspace_scoped_no_cross_workspace_grant(ctx):
     svc_b = ConsentService(s, wb)
     # B cannot grant consent for A's screenshot: generic not-found, nothing written.
     with pytest.raises(ScreenshotNotFoundError):
-        svc_b.record_consent(sid, True)
+        svc_b.record_consent(sid, True, disclosure=current_disclosure())
     # B cannot read it either; has_consent fails closed to False.
     with pytest.raises(ScreenshotNotFoundError):
         svc_b.get_consent(sid)

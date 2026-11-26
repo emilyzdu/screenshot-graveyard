@@ -66,6 +66,17 @@ class OperationServiceUnavailableError(OperationServiceError):
     """The database could not safely create, read, or update an operation."""
 
 
+class OperationGuardError(Exception):
+    """Raised by a ``complete_after_persistence`` guard: do not persist.
+
+    ``detail`` is the generic, safe failure detail recorded on the operation.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
 class OperationPersistenceError(OperationServiceError):
     """Related artifact persistence failed; the operation was not successful."""
 
@@ -293,6 +304,7 @@ class OperationService:
         persist: Callable[[], int | models.Artifact | None],
         *,
         terminal_status: str = "successful",
+        guard: Callable[[], None] | None = None,
     ) -> OperationState:
         """Atomically persist related work and make the operation successful.
 
@@ -306,6 +318,11 @@ class OperationService:
         uncertainty (P13, e.g. a study note with Uncertain/ambiguous content)
         and record ``uncertain`` in the SAME commit; it never becomes
         ``successful`` or ``failed`` through this path.
+
+        ``guard`` (Batch 6A) runs under the same lock, after the pending check
+        and before ``persist``. If it raises :class:`OperationGuardError`,
+        nothing is persisted and the operation fails with the guard's detail
+        (used to discard a result whose AI consent changed while in flight).
         """
         if terminal_status not in {"successful", "uncertain"}:
             raise ValueError("terminal_status must be successful or uncertain")
@@ -321,6 +338,8 @@ class OperationService:
                 raise OperationNotFoundError("operation not found")
             if current.status != "pending":
                 raise OperationTransitionError("operation is already terminal")
+            if guard is not None:
+                guard()
             persisted = persist()
             # Existing callers may return their freshly created ORM artifact;
             # new callers can return its integer ID. Both preserve the prior
@@ -339,6 +358,13 @@ class OperationService:
         except (OperationNotFoundError, OperationTransitionError):
             self._session.rollback()
             raise
+        except OperationGuardError as exc:
+            self._session.rollback()
+            try:
+                self.set_terminal_status(operation_id, "failed", error_detail=exc.detail)
+            except OperationTransitionError:
+                pass  # another serialized worker completed first; it stands
+            raise OperationPersistenceError("operation persistence refused") from exc
         except Exception as exc:
             self._session.rollback()
             try:
@@ -396,8 +422,26 @@ class OperationService:
                 operation.status = "failed"
                 operation.error_detail = "Processing interrupted; please retry"
                 operation.updated_at = moment
+            # Batch 6A (P2-F): finalize the dispatch audit in the SAME transaction.
+            # "interrupted" = the request may already have reached the provider
+            # (it is never recorded as "not sent"); its result was never saved.
+            # Only rows still "dispatched" change, so this is idempotent and a
+            # late worker (refused by the pending check) cannot overwrite it.
+            stale_ids = [op.id for op in stale]
+            if stale_ids:
+                for row in self._session.scalars(
+                    select(models.AIDispatch).where(
+                        models.AIDispatch.workspace_id == self._repo.workspace_id,
+                        models.AIDispatch.operation_id.in_(stale_ids),
+                        models.AIDispatch.state == "dispatched",
+                    )
+                ):
+                    row.state = "interrupted"
+                    row.completed_at = moment
             self._session.commit()
-        except SQLAlchemyError as exc:
+        except Exception as exc:
+            # Nothing is half-applied: the operations and their audit rows roll
+            # back together, to be recovered by the next sweep.
             self._session.rollback()
             raise OperationServiceUnavailableError("operation service unavailable") from exc
         return len(stale)

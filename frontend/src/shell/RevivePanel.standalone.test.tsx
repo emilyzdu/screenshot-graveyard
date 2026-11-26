@@ -10,6 +10,8 @@ import type { Screenshot } from '../api/client';
 const ai = vi.hoisted(() => ({
   getConsent: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<boolean>>>(),
   setConsent: vi.fn<(id: number, g: boolean, f?: typeof fetch) => Promise<ApiResult<boolean>>>(),
+  // Batch 6A (P1-A): the server's disclosure (Fake by default; real-mode tests override it).
+  getDisclosure: vi.fn(async () => ({ ok: true as const, data: { provider: 'fake' as const, revision: 'fake-test-rev', text: 'This development build uses the Fake AI adapter. Nothing is sent to an external AI provider, and the result is placeholder text that does not read your screenshot.' } })),
   classifyScreenshot: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Accepted>>>(),
   getOperation: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Operation>>>(),
   getAnalysis: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Analysis>>>(),

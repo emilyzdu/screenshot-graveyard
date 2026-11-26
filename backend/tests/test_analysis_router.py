@@ -28,6 +28,7 @@ from app.db.base import Base
 from app.db.repository import WorkspaceRepository
 from app.main import create_app
 from app.ratelimit import TokenBucketRateLimiter
+from tests.consent_helpers import grant_body
 
 TRUSTED = config.TRUSTED_ORIGINS[0]
 HDRS = {"Origin": TRUSTED, "X-Requested-With": "fetch"}
@@ -67,7 +68,7 @@ def client(tmp_path, monkeypatch):
 def _classified(c, color=(5, 6, 7)):
     r = c.post("/api/screenshots", headers=HDRS, files=[("files", ("a.png", png(color), "image/png"))])
     sid = r.json()["results"][0]["screenshotId"]
-    c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+    c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
     op = c.post(f"/api/screenshots/{sid}/classify", headers=HDRS).json()["operationId"]
     assert c.get(f"/api/operations/{op}").json()["status"] == "successful"
     return sid
@@ -145,6 +146,8 @@ def test_consecutive_analysis_edits_retain_history_and_failed_edit_rolls_back_bo
         "uncertain": False,
         "versionNumber": 2,
         "origin": "manual_edit",
+        "suggestedAction": None,  # Batch 6A: a correction never keeps an AI suggestion
+        "provider": None,  # Batch 6A (P2-E): written by you, not by a provider
     }
     assert category_edit.json()["epitaph"]["versionNumber"] == 1
 
@@ -282,7 +285,7 @@ def _note(c, n=2):
     for i in range(n):
         r = c.post("/api/screenshots", headers=HDRS, files=[("files", (f"{i}.png", png((i * 50, 1, 1)), "image/png"))])
         sid = r.json()["results"][0]["screenshotId"]
-        c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+        c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
         ids.append(sid)
     op = c.post("/api/study-notes", headers=HDRS, json={"screenshotIds": ids}).json()["operationId"]
     assert c.get(f"/api/operations/{op}").json()["status"] in {"successful", "uncertain"}

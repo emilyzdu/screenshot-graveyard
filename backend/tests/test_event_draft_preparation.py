@@ -20,9 +20,7 @@ from sqlalchemy.pool import NullPool
 
 from app import config
 import app.routers.preparations as prep_router
-from app.ai.adapter import AIAdapterError
 from app.ai.fake_adapter import FakeAIAdapter, FakeAIAdapterMode
-from app.ai.openai_vision_adapter import OpenAIVisionAdapter
 from app.db import models
 from app.db.base import Base
 from app.db.repository import WorkspaceRepository
@@ -233,7 +231,7 @@ def test_make_notes_and_calendar_drafts_are_separate_artifacts(env):
 
 # ---------------------------------------------------------------- failure and retry
 @pytest.mark.parametrize("mode, detail", [
-    (FakeAIAdapterMode.TIMEOUT, "AI analysis failed"),
+    (FakeAIAdapterMode.TIMEOUT, "AI analysis timed out"),
     (FakeAIAdapterMode.INVALID, "AI output failed validation"),
 ])
 def test_failed_event_draft_persists_nothing_then_retry_creates_one(env, mode, detail):
@@ -482,17 +480,35 @@ def test_event_drafts_count_toward_the_ai_quota(env, monkeypatch):
 
 
 # ---------------------------------------------------------------- provider and network
-def test_real_provider_fails_closed_at_the_route(env, monkeypatch):
+def test_real_provider_preparation_is_accepted_and_recorded_as_real(env, monkeypatch):
+    """Batch 6A: the consent-dispatch boundary now guards every adapter call, so a
+    real provider may prepare drafts. The provider is recorded with the request."""
     make_client, eng, adapter = env
     c = make_client()
-    sid = upload(c)
     monkeypatch.setattr(config, "AI_PROVIDER", "openai")
+    sid = upload(c)  # consent granted while the real provider is active (provider-scoped)
     r = prepare(c, sid)
-    assert r.status_code == 409 and r.json()["error"]["code"] == "provider_not_permitted"
-    assert counts(eng)["operations"] == 0 and adapter.event_calls == 0
+    assert r.status_code in (200, 202), r.text
+    assert r.json()["provider"] == "openai"
+    assert counts(eng)["operations"] == 1 and adapter.event_calls == 1  # the injected (mocked) adapter ran
 
 
-def test_real_provider_fails_closed_in_the_worker(env, held_event_job, monkeypatch):
+def test_a_real_provider_request_never_runs_after_a_switch_to_fake(env, monkeypatch, request):
+    held_fixture = "held_event_job" if "event_calls" == "event_calls" else "deferred_job"
+    held, real = request.getfixturevalue(held_fixture)
+    make_client, eng, adapter = env
+    c = make_client()
+    monkeypatch.setattr(config, "AI_PROVIDER", "openai")
+    sid = upload(c)  # consent granted while the real provider is active (provider-scoped)
+    op_id = prepare(c, sid).json()["operationId"]
+    monkeypatch.setattr(config, "AI_PROVIDER", "fake")  # reconfigured after acceptance
+    real(*held[0])
+    op = c.get(f"/api/operations/{op_id}").json()
+    assert op["status"] == "failed" and op["errorDetail"] == "AI processing unavailable"
+    assert adapter.event_calls == 0 and counts(eng)["artifacts"] == 0
+
+
+def test_a_request_accepted_as_simulated_never_runs_with_a_real_provider(env, held_event_job, monkeypatch):
     make_client, eng, adapter = env
     held, real = held_event_job
     c = make_client()
@@ -503,18 +519,6 @@ def test_real_provider_fails_closed_in_the_worker(env, held_event_job, monkeypat
     op = c.get(f"/api/operations/{op_id}").json()
     assert op["status"] == "failed" and op["errorDetail"] == "AI processing unavailable"
     assert adapter.event_calls == 0 and counts(eng)["artifacts"] == 0
-
-
-def test_the_openai_adapter_refuses_event_drafts_without_a_request():
-    class _NoCalls:
-        class responses:  # noqa: N801  (mirrors the SDK attribute name)
-            @staticmethod
-            def parse(**kwargs):
-                raise AssertionError("no provider request may be built")
-
-    adapter = OpenAIVisionAdapter(client=_NoCalls(), model="m")
-    with pytest.raises(AIAdapterError, match="not supported"):
-        adapter.event_draft([(1, b"\x89PNG", "image/png")])
 
 
 def test_no_network_connection_is_made_during_calendar_preparation(env, monkeypatch):

@@ -1,4 +1,4 @@
-import { normalizeAnalysisOrigin } from './analysisOrigin';
+import { normalizeAnalysisOrigin, normalizeResultProvider, type ResultProvider } from './analysisOrigin';
 
 // Minimal, typed API client for the Screenshot Graveyard backend.
 //
@@ -110,7 +110,13 @@ export interface ScreenshotAnalysis {
   epitaph: string;
   /** ai_generate | ai_redo | manual_edit */
   epitaphOrigin: string;
+  /**
+   * Batch 6A (P2-E): the provider that generated the current Epitaph version,
+   * or `null` when it was not recorded. Never inferred from the current mode.
+   */
+  epitaphProvider?: ResultProvider;
 }
+
 
 export interface Screenshot {
   screenshotId: number;
@@ -194,6 +200,7 @@ export async function listScreenshots(
     analysis: shot.analysis && {
       ...shot.analysis,
       epitaphOrigin: normalizeAnalysisOrigin(shot.analysis.epitaphOrigin),
+      epitaphProvider: normalizeResultProvider((shot.analysis as { epitaphProvider?: unknown }).epitaphProvider),
     },
   }));
   return { ok: true, screenshots };

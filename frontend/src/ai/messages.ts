@@ -1,4 +1,4 @@
-import { isAIAnalysisOrigin } from '../api/analysisOrigin';
+import { isAIAnalysisOrigin, type ResultProvider } from '../api/analysisOrigin';
 import type { ApiFailure, OperationStatus, ProviderMode } from '../api/ai';
 
 /** Plain-language text for a failed AI request (never shows raw server detail). */
@@ -35,7 +35,11 @@ export function describeOperationOutcome(
   if (status === 'pending') return 'Working\u2026';
   switch (errorDetail) {
     case 'AI processing consent required':
-      return 'AI consent is missing or was withdrawn before the work started. Nothing was processed.';
+      return 'AI consent is missing or was withdrawn, so nothing was saved. If the request had already been sent before the withdrawal, the AI provider may have received it; its result was discarded.';
+    case 'AI analysis timed out':
+      return 'The AI provider did not answer in time. Nothing was saved and your screenshot is unchanged. The provider may still have received the request.';
+    case 'AI provider busy; try again later':
+      return 'The AI provider is busy right now. Nothing was saved. Try again in a little while.';
     case 'AI operation quota exceeded':
       return 'This workspace\u2019s AI request allowance is used up.';
     case 'AI output failed validation':
@@ -84,3 +88,21 @@ export const STATUS_UNAVAILABLE_TEXT =
 /** Shown wherever archiving is offered or explained. */
 export const CRYPT_GALLERY_NOTE =
   'Archiving in The Crypt does not remove the photo from your phone gallery. It only moves it inside Screenshot Graveyard.';
+
+/**
+ * Batch 6A (P2-E): provenance from the provider recorded on the STORED version,
+ * never from the current provider mode. `null` = not recorded (an older
+ * version), which is said plainly rather than guessed.
+ */
+export function describeResultOrigin(origin: unknown, provider: ResultProvider): string {
+  if (origin === 'manual_edit') return 'edited by you';
+  if (!isAIAnalysisOrigin(origin)) return 'source unconfirmed';
+  const verb = origin === 'ai_redo' ? 'regenerated' : 'generated';
+  if (provider === 'fake') return `${verb} by the demo AI (placeholder text, not real image understanding)`;
+  if (provider === 'openai') return `${verb} by AI (a suggestion; it can be wrong)`;
+  return `${verb} by AI (unknown provider: not recorded for this version)`;
+}
+
+export function describeAuxiliaryResultOrigin(origin: unknown, provider: ResultProvider): string {
+  return isAIAnalysisOrigin(origin) ? describeResultOrigin(origin, provider) : 'field source unavailable';
+}

@@ -11,7 +11,7 @@ import {
 import { isAIAnalysisOrigin } from '../api/analysisOrigin';
 import { boundedFetch } from '../api/boundedFetch';
 import type { Screenshot } from '../api/client';
-import { describeEpitaphAuxiliaryOrigin, describeOperationOutcome, describeOrigin, describeRequestFailure } from '../ai/messages';
+import { describeAuxiliaryResultOrigin, describeOperationOutcome, describeRequestFailure, describeResultOrigin } from '../ai/messages';
 import { pollOperation } from '../ai/pollOperation';
 import {
   acquireRevive,
@@ -26,6 +26,7 @@ import {
   reviveWaitText,
 } from '../ai/reviveCoordinator';
 import { clearWithdrawal, isWithdrawalUnconfirmed, markWithdrawalUnconfirmed, useConsent } from '../ai/useConsent';
+import { DISCLOSURE_CHANGED_TEXT, grantableDisclosure, useDisclosure, type RefreshProvider } from '../ai/useDisclosure';
 import { DEFAULT_MAX_POLLS, DEFAULT_POLL_INTERVAL_MS } from '../ai/useOperationPolling';
 import { summaryKey, type AnalysisAuthority } from './sharedAnalysis';
 import { Badge, Button } from '../ui/primitives';
@@ -61,6 +62,11 @@ type Run =
 
 type Message = { error: boolean; text: string } | null;
 
+/** Exactly what withdrawal can and cannot do (the server's consent-dispatch boundary). */
+const WITHDRAW_EXPLAINER =
+  'Withdrawing consent blocks every new AI request for it. A request already sent may still complete at the AI provider; its result is not saved.';
+const WITHDRAWN_TEXT = `AI consent withdrawn. ${WITHDRAW_EXPLAINER}`;
+
 /**
  * Set once the server confirms a Revive finished successfully (or a persisted
  * analysis proves it). From then on this panel never offers Revive again;
@@ -81,6 +87,12 @@ interface Props {
   screenshot: Screenshot;
   providerMode: ProviderMode | 'unknown';
   providerLoading: boolean;
+  /**
+   * Re-read the server's provider mode (Batch 6A C2). Used with the disclosure
+   * to recover, as a coherent pair, after the server reports that the
+   * disclosure changed (e.g. it switched provider).
+   */
+  refreshProvider?: RefreshProvider;
   /** Called after the server reports a new persisted analysis, so the gallery can re-sync. */
   onAnalysisChanged: () => void;
   /**
@@ -96,13 +108,17 @@ interface Props {
 /**
  * Consent + Revive + classification result for one screenshot in the Gothic
  * drawer. Opening it only READS (consent, analysis, operation status). Nothing is
- * processed until the user grants consent and presses Revive. Revive is only
- * offered while the server reports the Fake AI provider (Batch 3A).
+ * processed until the user grants consent and presses Revive. Revive is offered
+ * once the server's provider is confirmed: the Fake AI (simulated, nothing
+ * sent) or the real provider (Batch 6A: the image is sent for analysis, guarded
+ * by the server's consent-dispatch boundary). An unconfirmed provider offers
+ * nothing.
  */
 export function RevivePanel({
   screenshot,
   providerMode,
   providerLoading,
+  refreshProvider,
   onAnalysisChanged,
   analysisAuthority,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
@@ -133,6 +149,15 @@ export function RevivePanel({
     setConfirmedState(next);
   };
   const [withdrawal, setWithdrawal] = useState<Withdrawal>(() => (isWithdrawalUnconfirmed(id) ? 'unconfirmed' : null));
+  // P1-A: the server's disclosure, shown verbatim; a grant echoes exactly this one.
+  const { state: disclosureState, recover: recoverDisclosure } = useDisclosure();
+  const shownDisclosure = grantableDisclosure(disclosureState, providerMode);
+  const recheckDisclosure = () => void recoverDisclosure(refreshProvider);
+  // Loaded, but for another provider than the server mode on screen (or the
+  // two kept changing): never grantable; say so and offer a fresh check.
+  const disclosureMismatch =
+    disclosureState.t === 'changing' ||
+    (disclosureState.t === 'ready' && providerMode !== 'unknown' && disclosureState.disclosure.provider !== providerMode);
 
   // Per-mount lifetime. Each mount gets its own AbortController; an async step
   // captures that mount's signal and applies results only while it is not
@@ -307,7 +332,9 @@ export function RevivePanel({
         setWithdrawal('pending');
         setConsentLookup(id, 'checking');
       }
-      const res = await setConsent(id, granted, read());
+      const shown = granted ? shownDisclosure : null;
+      if (granted && shown === null) return; // nothing to agree to yet: never grant blind
+      const res = granted && shown ? await setConsent(id, true, read(), shown) : await setConsent(id, false, read());
       // Registry updates happen even if the drawer closed meanwhile.
       if (res.ok && res.data === granted) clearWithdrawal(id);
       if (!alive()) return;
@@ -327,11 +354,18 @@ export function RevivePanel({
             ? 'AI consent granted for this screenshot. It stays in place until you withdraw it; closing this panel does not withdraw it.'
             : declined
               ? 'You declined AI processing. Nothing will be analyzed. Storing, archiving and restoring still work.'
-              : 'AI consent withdrawn. Future AI use is blocked. Withdrawing cannot stop an analysis that already started.',
+              : WITHDRAWN_TEXT,
         });
         return;
       }
       if (!granted) setWithdrawal('unconfirmed');
+      if (granted && res.status === 409 && res.code === 'disclosure_changed') {
+        // Nothing was recorded. Show the current disclosure; the user decides again.
+        setMessage({ error: true, text: DISCLOSURE_CHANGED_TEXT });
+        // Provider mode and disclosure are re-read together; nothing is re-sent.
+        recheckDisclosure();
+        return;
+      }
       setMessage({ error: true, text: describeRequestFailure(res) });
       // The answer may have been lost after the server saved it: show the server's view.
       void refreshConsent([id]);
@@ -449,9 +483,11 @@ export function RevivePanel({
   const working = run.t === 'submitting' || run.t === 'polling' || run.t === 'checking';
   const unresolved = run.t === 'unresolved' || run.t === 'checking';
   const fake = providerMode === 'fake';
+  const real = providerMode === 'openai';
+  const providerKnown = fake || real;
   const consentBlocked = withdrawal !== null || isWithdrawalUnconfirmed(id);
   const canRevive =
-    fake &&
+    providerKnown &&
     !archived &&
     consent === 'granted' &&
     !consentBlocked &&
@@ -467,27 +503,29 @@ export function RevivePanel({
       <div className="sg-revive__head">
         <h3 id="sg-revive-h">Revive</h3>
         {fake && <Badge tone="peach">Fake AI · development</Badge>}
+        {real && <Badge tone="violet">Real AI · OpenAI</Badge>}
       </div>
 
       <div className="sg-revive__privacy" role="note" aria-label="AI processing">
-        {providerMode === 'fake' && (
+        {providerKnown && shownDisclosure && <p data-disclosure-revision={shownDisclosure.revision}>{shownDisclosure.text}</p>}
+        {providerKnown && disclosureState.t === 'loading' && <p>Loading the AI processing disclosure…</p>}
+        {disclosureState.t === 'error' && (
           <p>
-            This development build uses the Fake AI adapter. Nothing is sent to an external AI provider, and the
-            result is placeholder text that does not read your screenshot.
+            The AI processing disclosure could not be loaded, so consent cannot be given right now.{' '}
+            <Button size="sm" variant="ghost" onClick={recheckDisclosure}>Load it again</Button>
           </p>
         )}
-        {providerMode === 'openai' && (
-          <p>
-            A real AI provider is configured on the server. Revive is turned off in this build until the
-            consent-dispatch safety fix is in place.
+        {disclosureMismatch && (
+          <p role="status">
+            The AI provider changed while this was being checked, so consent cannot be given yet.{' '}
+            <Button size="sm" variant="ghost" onClick={recheckDisclosure}>Check again</Button>
           </p>
         )}
         {providerMode === 'unknown' && (
           <p>{providerLoading ? 'Checking the AI provider…' : 'The AI provider could not be confirmed, so Revive is unavailable.'}</p>
         )}
         <p className="sg-muted">
-          AI processing needs your explicit consent for this screenshot. Withdrawing consent stops future AI use; it
-          cannot stop an analysis that already started.
+          AI processing needs your explicit consent for this screenshot. {WITHDRAW_EXPLAINER}
         </p>
       </div>
 
@@ -510,7 +548,7 @@ export function RevivePanel({
                 Check consent
               </Button>
               {consent === 'granted' && (
-                <Button size="sm" variant="ghost" disabled={busy || providerMode !== 'fake'} onClick={() => void recordConsent(true, false)}>
+                <Button size="sm" variant="ghost" disabled={busy || !providerKnown || !shownDisclosure} onClick={() => void recordConsent(true, false)}>
                   Allow AI processing
                 </Button>
               )}
@@ -533,7 +571,7 @@ export function RevivePanel({
           <div className="sg-revive__row">
             <Button
               size="sm"
-              disabled={busy || consent === 'checking' || providerMode !== 'fake'}
+              disabled={busy || consent === 'checking' || !providerKnown || !shownDisclosure}
               onClick={() => void recordConsent(true, false)}
             >
               Allow AI processing
@@ -548,9 +586,13 @@ export function RevivePanel({
       {analysis.phase === 'none' && !archived && confirmed === null && (
         <div className="sg-revive__row">
           <Button variant="primary" icon="sparkles" disabled={!canRevive} aria-busy={working} onClick={() => void onRevive()}>
-            {run.t === 'submitting' ? 'Starting…' : run.t === 'polling' ? 'Reviving…' : 'Revive with Fake AI'}
+            {run.t === 'submitting'
+              ? 'Starting…'
+              : run.t === 'polling'
+                ? real ? 'Analyzing your screenshot…' : 'Reviving…'
+                : real ? 'Revive with AI' : 'Revive with Fake AI'}
           </Button>
-          {consent !== 'granted' && fake && <span className="sg-muted">Allow AI processing first.</span>}
+          {consent !== 'granted' && providerKnown && <span className="sg-muted">Allow AI processing first.</span>}
         </div>
       )}
       {analysis.phase === 'none' && archived && confirmed === null && (
@@ -565,7 +607,13 @@ export function RevivePanel({
       )}
 
       {(run.t === 'submitting' || run.t === 'polling') && (
-        <p role="status">{run.t === 'submitting' ? 'Sending the Revive request…' : 'Revive is running on the server…'}</p>
+        <p role="status">
+          {run.t === 'submitting'
+            ? 'Sending the Revive request…'
+            : real
+              ? 'The AI is analyzing your screenshot. This usually takes a few seconds…'
+              : 'Revive is running on the server…'}
+        </p>
       )}
       {run.t === 'done' && run.status !== 'successful' && (
         <p role="alert">{describeOperationOutcome(run.status, run.errorDetail)}</p>
@@ -607,8 +655,13 @@ export function RevivePanel({
           <div className="sg-result__head">
             <span className="sg-result__category">{ready.classification.category}</span>
             {ready.classification.uncertain && <Badge tone="muted">Uncertain</Badge>}
-            {fake && isAIAnalysisOrigin(ready.classification.origin) && isAIAnalysisOrigin(ready.epitaph.origin) &&
+            {/* P2-E: from the provider recorded on this version, never the current mode. */}
+            {isAIAnalysisOrigin(ready.classification.origin) && ready.classification.provider === 'fake' &&
               <Badge tone="peach">Simulated result</Badge>}
+            {isAIAnalysisOrigin(ready.classification.origin) && ready.classification.provider === 'openai' &&
+              <Badge tone="violet">AI analysis · can be wrong</Badge>}
+            {isAIAnalysisOrigin(ready.classification.origin) && !ready.classification.provider &&
+              <Badge tone="muted">AI result · unknown provider</Badge>}
           </div>
           <dl className="sg-facts">
             <dt>Confidence</dt>
@@ -621,32 +674,32 @@ export function RevivePanel({
                 ? 'Not shown: this category was edited by you, so there is no model confidence for it.'
                 : !isAIAnalysisOrigin(ready.classification.origin)
                   ? 'Not shown: the category source could not be confirmed.'
-                  : providerMode === 'openai'
+                  : ready.classification.provider === 'openai'
                     ? `${Math.round(ready.classification.confidence * 100)}% as reported by the model (not a calibrated probability)`
-                    : fake
+                    : ready.classification.provider === 'fake'
                       ? 'Not meaningful: the Fake AI returns a fixed placeholder value.'
-                      : 'Not shown: the AI provider could not be confirmed.'}
+                      : 'Not shown: the provider of this result was not recorded, so its confidence cannot be interpreted.'}
             </dd>
             <dt>Epitaph</dt>
             <dd>{ready.epitaph.text}</dd>
             <dt>Visible facts</dt>
             <dd>
               {ready.epitaph.visibleFacts || 'None recorded.'}
-              {ready.epitaph.visibleFacts && <small className="sg-muted"> ({describeEpitaphAuxiliaryOrigin(ready.epitaph.origin, providerMode)})</small>}
+              {ready.epitaph.visibleFacts && <small className="sg-muted"> ({describeAuxiliaryResultOrigin(ready.epitaph.origin, ready.epitaph.provider ?? null)})</small>}
             </dd>
             {ready.epitaph.inferredIntent !== null && (
               <>
                 <dt>Guessed purpose</dt>
                 <dd>
                   {ready.epitaph.inferredIntent}
-                  <small className="sg-muted"> ({describeEpitaphAuxiliaryOrigin(ready.epitaph.origin, providerMode)})</small>
+                  <small className="sg-muted"> ({describeAuxiliaryResultOrigin(ready.epitaph.origin, ready.epitaph.provider ?? null)})</small>
                 </dd>
               </>
             )}
             <dt>Source</dt>
             <dd>
-              Category {describeOrigin(ready.classification.origin, providerMode)} (version{' '}
-              {ready.classification.versionNumber}). Epitaph {describeOrigin(ready.epitaph.origin, providerMode)} (version{' '}
+              Category {describeResultOrigin(ready.classification.origin, ready.classification.provider ?? null)} (version{' '}
+              {ready.classification.versionNumber}). Epitaph {describeResultOrigin(ready.epitaph.origin, ready.epitaph.provider ?? null)} (version{' '}
               {ready.epitaph.versionNumber}).
             </dd>
           </dl>

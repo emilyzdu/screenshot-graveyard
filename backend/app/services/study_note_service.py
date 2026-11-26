@@ -45,10 +45,16 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import config
-from app.ai.adapter import AIAdapter, AIAdapterError
+from app.ai.adapter import AIAdapter, adapter_failure_detail
 from app.ai.redo_instructions import RedoInstructionsError, normalize_redo_instructions
 from app.ai.schemas import StudyNoteResult
 from app.db.repository import WorkspaceRepository
+from app.services.ai_dispatch_service import (
+    AIDispatchService,
+    DispatchDeniedError,
+    DispatchSupersededError,
+    DispatchTicket,
+)
 from app.services.artifact_version_service import ORIGIN_AI_REDO, ArtifactVersionService
 from app.services.consent_service import (
     ConsentRequiredError,
@@ -101,6 +107,7 @@ class StudyNoteService:
         self._vault = vault or VaultService(session, workspace_id)
         self._repo = WorkspaceRepository(session, workspace_id)
         self._versions = ArtifactVersionService(session, workspace_id)
+        self._dispatch = AIDispatchService(session, workspace_id)
 
     def run_generation(
         self, screenshot_ids: list[int], operation_id: int
@@ -122,9 +129,10 @@ class StudyNoteService:
             return self._fail(operation_id, "Invalid selection")
 
         # 2-6) Consent, read, ONE adapter call, strict validation.
-        result = self._authorize_and_generate(ids, operation_id, None)
-        if isinstance(result, StudyNoteOutcome):
-            return result
+        authorized = self._authorize_and_generate(ids, operation_id, None)
+        if isinstance(authorized, StudyNoteOutcome):
+            return authorized
+        result, ticket = authorized
 
         # 7) Atomic persistence: note + v1 + source refs + pointer + status.
         uncertain = len(result.uncertain_content) > 0
@@ -145,17 +153,18 @@ class StudyNoteService:
                 operation_id,
                 _persist,
                 terminal_status="uncertain" if uncertain else "successful",
+                guard=lambda: self._dispatch.verify_for_persistence(ticket),
             )
-        except OperationPersistenceError:
-            return StudyNoteOutcome(operation=self._operations.get(operation_id))
-        except OperationTransitionError:
-            # A concurrent worker finished first; its result stands.
+        except (OperationPersistenceError, OperationTransitionError):
+            # Refused (consent changed), failed, or a concurrent worker finished
+            # first; in every case nothing from this result was saved.
+            self._dispatch.discard(ticket)
             return StudyNoteOutcome(operation=self._operations.get(operation_id))
         return StudyNoteOutcome(operation=op, artifact_id=created.get("artifact_id"))
 
     def _authorize_and_generate(
         self, ids: list[int], operation_id: int, instructions: str | None
-    ) -> "StudyNoteResult | StudyNoteOutcome":
+    ) -> "tuple[StudyNoteResult, DispatchTicket] | StudyNoteOutcome":
         """Shared by initial generation and AI Redo (Task 3.3).
 
         Consent for EVERY source is (re)checked, originals are read, exactly ONE
@@ -195,37 +204,29 @@ class StudyNoteService:
         except (VaultScreenshotNotFoundError, VaultServiceError):
             return self._fail(operation_id, "Not found")
 
-        # Reading up to twelve originals can take enough time for a user to
-        # revoke consent. Re-check EVERY selected screenshot immediately before
-        # the only external-facing boundary; otherwise revocation during the
-        # final read could still reach the adapter.
+        # Dispatch authorization (Batch 6A, tasks.md 7.1): ONE short locked
+        # transaction reads the consent of EVERY selected screenshot at one
+        # ordered instant, records the heartbeat and the dispatch. It is the last
+        # statement before the adapter call. A withdrawal of any source committed
+        # before it means no adapter call at all (all or nothing).
         try:
-            for sid in ids:
-                self._consent.require_consent(sid)
-        except ConsentRequiredError:
-            return self._fail(operation_id, "AI processing consent required")
-        except ConsentScreenshotNotFoundError:
-            return self._fail(operation_id, "Not found")
-        except ConsentServiceUnavailableError:
-            return self._fail(operation_id, "AI processing unavailable")
-
-        # 4) EXACTLY ONE adapter call.
-        # Refresh the operation heartbeat after the potentially lengthy source
-        # reads and immediately before the adapter boundary.  The stale sweep
-        # can then distinguish queued/active work from a crashed worker.
-        try:
-            self._operations.heartbeat_pending(operation_id)
-        except OperationTransitionError:
+            ticket = self._dispatch.authorize(operation_id, ids, adapter_provider=getattr(self._adapter, "provider_id", None))
+        except DispatchSupersededError:
+            images.clear()
             return StudyNoteOutcome(operation=self._operations.get(operation_id))
+        except DispatchDeniedError as exc:
+            images.clear()
+            return self._fail(operation_id, exc.detail)
+
+        # 4) EXACTLY ONE adapter call. From here the request may have been sent.
         try:
             if instructions is None:
                 raw = self._adapter.study_note(images)
             else:
                 raw = self._adapter.study_note(images, instructions=instructions)
-        except AIAdapterError:
-            return self._fail(operation_id, "AI analysis failed")
-        except Exception:
-            return self._fail(operation_id, "AI analysis failed")
+        except Exception as exc:
+            self._dispatch.discard(ticket)
+            return self._fail(operation_id, adapter_failure_detail(exc))
         finally:
             images.clear()  # drop references to image bytes promptly
 
@@ -234,14 +235,16 @@ class StudyNoteService:
             payload = raw.model_dump() if isinstance(raw, BaseModel) else raw
             result = StudyNoteResult.model_validate(payload)
         except Exception:
+            self._dispatch.discard(ticket)
             return self._fail(operation_id, "AI output failed validation")
 
         # 6) References must be exactly the selected IDs: no fabricated,
         #    missing, duplicate or foreign IDs; nothing silently discarded.
         if result.references != ids:
+            self._dispatch.discard(ticket)
             return self._fail(operation_id, "AI output references invalid")
 
-        return result
+        return result, ticket
 
     def run_redo(
         self, artifact_id: int, operation_id: int, instructions: str | None
@@ -296,9 +299,10 @@ class StudyNoteService:
             return self._fail(operation_id, "Invalid selection")
 
         # 2-6) Consent for EVERY source, read, one adapter call, strict validation.
-        result = self._authorize_and_generate(ids, operation_id, instructions)
-        if isinstance(result, StudyNoteOutcome):
-            return result
+        authorized = self._authorize_and_generate(ids, operation_id, instructions)
+        if isinstance(authorized, StudyNoteOutcome):
+            return authorized
+        result, ticket = authorized
 
         # 7) Atomic: new ai_redo version + pointer + operation status, or nothing.
         uncertain = len(result.uncertain_content) > 0
@@ -314,8 +318,10 @@ class StudyNoteService:
                 operation_id,
                 _persist,
                 terminal_status="uncertain" if uncertain else "successful",
+                guard=lambda: self._dispatch.verify_for_persistence(ticket),
             )
         except (OperationPersistenceError, OperationTransitionError):
+            self._dispatch.discard(ticket)
             return StudyNoteOutcome(operation=self._operations.get(operation_id))
         return StudyNoteOutcome(operation=op, artifact_id=artifact.id)
 

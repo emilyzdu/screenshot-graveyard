@@ -581,8 +581,9 @@ The properties are grouped into these reusable modules:
 
 ### Phase 7: Backend safety follow-ups (additive; not part of Draft PR #1)
 
-- [ ] 7.1 Close the consent check-to-dispatch race for Classification and Study Notes
-  - Proposal only so far: `.kiro/specs/screenshot-graveyard/consent-dispatch-boundary-proposal.md`. **Not implemented in PR #1, and PR #1 does not eliminate the race:** consent can still be revoked after the worker's last check and before the adapter call (`classification_service.py` 221 to 242, `study_note_service.py` 204 to 222).
+- [x] 7.1 Close the consent check-to-dispatch race for Classification and Study Notes
+  - **Implemented in Batch 6A** (`backend/app/services/ai_dispatch_service.py`, migration `c6a1d15a0001`), for Classification, Study Notes / Make Notes, both Redo paths and Calendar event drafts: one locked authorization transaction (fresh consent for every source + heartbeat + `ai_dispatch` rows) immediately before the adapter call, consent writes under the same workspace lock, a consent version bumped on every change, a persistence guard that discards a result if consent changed while the request was out, and provider-scoped consent (a Fake-mode grant never authorizes a real provider). Tests: `backend/tests/test_ai_dispatch.py`. A request authorized before a withdrawal cannot be recalled; its result is not saved.
+  - History: the proposal is `.kiro/specs/screenshot-graveyard/consent-dispatch-boundary-proposal.md`. PR #1 did not eliminate the race (`classification_service.py` 221 to 242, `study_note_service.py` 204 to 222 at that time).
   - Implement the recommended design from the proposal (durable dispatch ledger, consent version, revoke aborting not-yet-sent dispatches, persistence guard) as a separately reviewable backend PR, with deterministic adapter-boundary revocation tests for Classification, Study Notes, and both Redo paths. State plainly in code, UI copy, and docs that revocation cannot recall content already sent or stop a call in flight.
   - **Dependencies:** 2.3, 2.5, 2.7, 3.3
   - **Requirements:** 9.2, 9.4

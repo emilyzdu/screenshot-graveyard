@@ -32,6 +32,7 @@ from app.services.operation_service import OperationNotFoundError, OperationServ
 from app.services.study_note_service import StudyNoteService
 from app.services.vault_service import VaultService
 from app.storage.file_store import FileStore
+from tests.consent_helpers import current_disclosure
 
 PBT = settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture])
 
@@ -132,7 +133,7 @@ def _class_setup(session, store, wid, color, *, consent=True):
     data = _image(color)
     sid = vault.upload(data, filename="fixture.png").screenshot_id
     if consent:
-        ConsentService(session, wid).record_consent(sid, True)
+        ConsentService(session, wid).record_consent(sid, True, disclosure=current_disclosure())
     op = OperationService(session, wid).create_pending("classify")
     return vault, sid, op.operation_id, data
 
@@ -174,7 +175,7 @@ def test_p12_schema_gate_rejects_malformed_study_note_content(malformed, color, 
             wid = _workspace(s, "k" * 64)
             vault = VaultService(s, wid, file_store=store)
             sid = vault.upload(_image(color), filename="fixture.png").screenshot_id
-            ConsentService(s, wid).record_consent(sid, True)
+            ConsentService(s, wid).record_consent(sid, True, disclosure=current_disclosure())
             raw = {
                 "empty_topic": {"topic": "", "references": [sid]},
                 "bad_reference": {"topic": "x", "references": ["not-an-id"]},
@@ -208,7 +209,7 @@ def test_p13_uncertainty_is_persisted_or_terminally_represented(kind, color, tmp
             else:
                 vault = VaultService(s, wid, file_store=store)
                 sid = vault.upload(_image(color), filename="fixture.png").screenshot_id
-                ConsentService(s, wid).record_consent(sid, True)
+                ConsentService(s, wid).record_consent(sid, True, disclosure=current_disclosure())
                 adapter = NoteAdapter(lambda images: _note(images, uncertain=True))
                 out = StudyNoteService(s, wid, adapter=adapter, vault=vault).run_generation([sid], OperationService(s, wid).create_pending("study_note").operation_id)
                 assert out.operation.status == "uncertain" and out.artifact_id is not None
@@ -307,7 +308,7 @@ def test_p24_study_note_references_must_be_exact_owned_selection(variant, salt, 
             a1 = va.upload(_image((1, 2, 3)), filename="a1.png").screenshot_id
             a2 = va.upload(_image((4, 5, 6)), filename="a2.png").screenshot_id
             foreign = vb.upload(_image((7, 8, 9)), filename="b.png").screenshot_id
-            for sid in (a1, a2): ConsentService(s, wa).record_consent(sid, True)
+            for sid in (a1, a2): ConsentService(s, wa).record_consent(sid, True, disclosure=current_disclosure())
             selected = [a1, a2]
             refs = {
                 "valid": selected,

@@ -5,7 +5,7 @@ worker step for step, deliberately as a separate module so that worker is not
 touched:
 
   pending + kind check -> consent -> read the original -> consent again
-  -> heartbeat -> ONE adapter call -> strict re-validation -> references check
+  -> dispatch authorization (consent + heartbeat, Batch 6A) -> ONE adapter call -> strict re-validation -> references check
   -> atomic persistence of the ``event_draft`` artifact + version 1 + source
   reference + current-version pointer + operation status.
 
@@ -31,9 +31,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import config
-from app.ai.adapter import AIAdapter, AIAdapterError
+from app.ai.adapter import AIAdapter, adapter_failure_detail
 from app.ai.schemas import EventDraftResult
 from app.db.repository import WorkspaceRepository
+from app.services.ai_dispatch_service import AIDispatchService, DispatchDeniedError, DispatchSupersededError
 from app.services.artifact_version_service import ArtifactVersionService
 from app.services.consent_service import (
     ConsentRequiredError,
@@ -84,6 +85,7 @@ class EventDraftService:
         self._vault = vault or VaultService(session, workspace_id)
         self._repo = WorkspaceRepository(session, workspace_id)
         self._versions = ArtifactVersionService(session, workspace_id)
+        self._dispatch = AIDispatchService(session, workspace_id)
 
     def run_generation(self, screenshot_id: int, operation_id: int) -> EventDraftOutcome:
         """Execute one event_draft operation. Intended as the BackgroundTask body."""
@@ -102,31 +104,33 @@ class EventDraftService:
             return self._fail(operation_id, "AI input exceeds configured limits")
         images = [(screenshot_id, original.data, original.mime_type)]
         del original
-        # Re-check immediately before the only adapter boundary.
-        failure = self._require_consent(screenshot_id, operation_id)
-        if failure is not None:
-            images.clear()
-            return failure
+        # Dispatch authorization (Batch 6A, tasks.md 7.1): ONE short locked
+        # transaction re-reads consent, records the heartbeat and the dispatch;
+        # the last statement before the adapter call.
         try:
-            self._operations.heartbeat_pending(operation_id)
-        except OperationTransitionError:
+            ticket = self._dispatch.authorize(operation_id, [screenshot_id], adapter_provider=getattr(self._adapter, "provider_id", None))
+        except DispatchSupersededError:
             images.clear()
             return EventDraftOutcome(operation=self._operations.get(operation_id))
+        except DispatchDeniedError as exc:
+            images.clear()
+            return self._fail(operation_id, exc.detail)
 
         try:
-            raw = self._adapter.event_draft(images)  # EXACTLY ONE call
-        except AIAdapterError:
-            return self._fail(operation_id, "AI analysis failed")
-        except Exception:
-            return self._fail(operation_id, "AI analysis failed")
+            raw = self._adapter.event_draft(images)  # EXACTLY ONE call; may have been sent from here
+        except Exception as exc:
+            self._dispatch.discard(ticket)
+            return self._fail(operation_id, adapter_failure_detail(exc))
         finally:
             images.clear()
         try:
             payload = raw.model_dump() if isinstance(raw, BaseModel) else raw
             result = EventDraftResult.model_validate(payload)
         except Exception:
+            self._dispatch.discard(ticket)
             return self._fail(operation_id, "AI output failed validation")
         if result.references != [screenshot_id]:
+            self._dispatch.discard(ticket)
             return self._fail(operation_id, "AI output references invalid")
 
         uncertain = bool(result.missing_fields or result.uncertain_fields)
@@ -141,9 +145,13 @@ class EventDraftService:
 
         try:
             op = self._operations.complete_after_persistence(
-                operation_id, _persist, terminal_status="uncertain" if uncertain else "successful"
+                operation_id,
+                _persist,
+                terminal_status="uncertain" if uncertain else "successful",
+                guard=lambda: self._dispatch.verify_for_persistence(ticket),
             )
         except (OperationPersistenceError, OperationTransitionError):
+            self._dispatch.discard(ticket)
             return EventDraftOutcome(operation=self._operations.get(operation_id))
         return EventDraftOutcome(operation=op, artifact_id=created.get("artifact_id"))
 

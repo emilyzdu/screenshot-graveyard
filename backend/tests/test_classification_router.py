@@ -30,6 +30,7 @@ from app.ratelimit import TokenBucketRateLimiter
 from app.ai import provider
 from app.ai.fake_adapter import FakeAIAdapter, FakeAIAdapterMode
 from app.ai.schemas import ClassificationResult
+from tests.consent_helpers import grant_body
 
 TRUSTED = config.TRUSTED_ORIGINS[0]
 HDRS = {"Origin": TRUSTED, "X-Requested-With": "fetch"}
@@ -97,7 +98,7 @@ def _upload(c, data=None) -> int:
 
 
 def _grant(c, sid, granted=True):
-    return c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": granted})
+    return c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body() if granted else {"granted": False})
 
 
 def test_authorized_classify_202_then_polls_successful_one_adapter_call(client):

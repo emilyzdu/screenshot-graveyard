@@ -1,5 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getProviderMode, type ProviderMode } from '../api/ai';
+import { boundedFetch, withDeadline } from '../api/boundedFetch';
+/** Same bound as the disclosure read (`useDisclosure`). */
+const PROVIDER_STATUS_TIMEOUT_MS = 10_000;
 
 /**
  * General privacy warning shown BEFORE any AI analysis (Req 9.1, 9.3).
@@ -9,21 +12,42 @@ import { getProviderMode, type ProviderMode } from '../api/ai';
 // These hooks intentionally share the provider-status request with the AI UI
 // components; they are not React components themselves.
 // eslint-disable-next-line react-refresh/only-export-components
-export function useProviderStatus(): { mode: ProviderMode | 'unknown'; loading: boolean } {
+export function useProviderStatus(): {
+  mode: ProviderMode | 'unknown';
+  loading: boolean;
+  /**
+   * Re-read the provider (Batch 6A C2). Latest call wins: resolves to the mode
+   * it applied, or `null` if a newer read superseded it.
+   */
+  refresh: () => Promise<ProviderMode | 'unknown' | null>;
+} {
   const [state, setState] = useState<{ mode: ProviderMode | 'unknown'; loading: boolean }>({
     mode: 'unknown',
     loading: true,
   });
-  useEffect(() => {
-    let active = true;
-    void getProviderMode().then((r) => {
-      if (active) setState({ mode: r.ok ? r.data : 'unknown', loading: false });
-    });
-    return () => {
-      active = false;
-    };
+  const ticket = useRef(0);
+  const read = useCallback(async (): Promise<ProviderMode | 'unknown' | null> => {
+    const mine = ++ticket.current;
+    let r;
+    try {
+      // D2: bounded like the disclosure read; a stall becomes 'unknown' (retryable).
+      r = await withDeadline(getProviderMode(boundedFetch(PROVIDER_STATUS_TIMEOUT_MS)), PROVIDER_STATUS_TIMEOUT_MS);
+    } catch {
+      r = undefined;
+    }
+    if (mine !== ticket.current) return null; // a newer read owns the state
+    const mode = r?.ok ? r.data : 'unknown';
+    setState({ mode, loading: false });
+    return mode;
   }, []);
-  return state;
+  useEffect(() => {
+    void read();
+    const t = ticket;
+    return () => {
+      t.current += 1;
+    };
+  }, [read]);
+  return { ...state, refresh: read };
 }
 
 // While loading, the mode stays 'unknown' so every gate remains closed.

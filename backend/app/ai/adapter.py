@@ -42,6 +42,28 @@ class AIAdapterTimeoutError(AIAdapterError):
     """
 
 
+class AIAdapterRateLimitedError(AIAdapterError):
+    """The provider refused the request because of a rate or quota limit.
+
+    Nothing was produced; the user may retry later. Never retried automatically.
+    """
+
+
+class AIAdapterOutputError(AIAdapterError):
+    """The provider answered, but its output failed validation (nothing is used)."""
+
+
+def adapter_failure_detail(exc: BaseException) -> str:
+    """The generic, user-safe operation detail for an adapter failure."""
+    if isinstance(exc, AIAdapterOutputError):
+        return "AI output failed validation"
+    if isinstance(exc, AIAdapterTimeoutError):
+        return "AI analysis timed out"
+    if isinstance(exc, AIAdapterRateLimitedError):
+        return "AI provider busy; try again later"
+    return "AI analysis failed"
+
+
 def default_timeout_seconds() -> float:
     """The default per-call adapter timeout, from server configuration."""
     return config.AI_ADAPTER_TIMEOUT_SECONDS

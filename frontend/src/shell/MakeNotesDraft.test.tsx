@@ -239,7 +239,7 @@ describe('Make Notes: prepare, persist, reopen', () => {
     expect(within(region()).queryByText('Synthetic study note fixture')).not.toBeInTheDocument();
   });
 
-  it('provenance comes from the server record: a Fake draft viewed in openai mode is still "Simulated"; Prepare is disabled', async () => {
+  it('provenance comes from the server record: a Fake draft viewed in openai mode is still "Simulated"; Prepare says it sends to OpenAI', async () => {
     ai.getProviderMode.mockResolvedValue({ ok: true, data: 'openai' });
     ai.getMakeNotesPreparation.mockImplementation(async (id) =>
       id === 1 ? { ok: true, data: prep(1, { status: 'successful', artifactId: 501 }) } : fail(404, 'no_preparation'));
@@ -252,8 +252,8 @@ describe('Make Notes: prepare, persist, reopen', () => {
     await within(A()).findByText('Visible facts');
     fireEvent.click(within(A()).getByRole('button', { name: /Something else/ }));
     await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Make Notes' })); });
-    expect(await within(A()).findByRole('button', { name: 'Prepare draft' })).toBeDisabled();
-    expect(within(A()).getByText(/turned off with a real AI provider/)).toBeInTheDocument();
+    expect(await within(A()).findByRole('button', { name: 'Prepare draft' })).toBeEnabled();
+    expect(within(A()).getByText(/Sends this screenshot to OpenAI to draft study notes/)).toBeInTheDocument();
   });
 
   it('an edited draft is labelled as edited by you, not simulated', async () => {
@@ -403,5 +403,26 @@ describe('B2: Make Notes polling only accepts its own study_note operation', () 
     expect(within(region()).getByRole('button', { name: 'Check status' })).toBeInTheDocument();
     expect(ai.getStudyNote).not.toHaveBeenCalled();
     expect(ai.requestMakeNotesDraft).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Batch 6A: real-provider notes drafts', () => {
+  it('AI-written notes are labelled as unreviewed AI output, never as simulated', async () => {
+    ai.getProviderMode.mockResolvedValue({ ok: true, data: 'openai' });
+    ai.getMakeNotesPreparation.mockResolvedValue({ ok: true, data: prep(1, { status: 'uncertain', artifactId: 501, provider: 'openai' }) });
+    ai.getStudyNote.mockResolvedValue({ ok: true, data: {
+      ...note(501, [1]),
+      content: { ...note(501, [1]).content, topic: 'Binary search', uncertain_content: ['The last line is cut off'] },
+    } });
+    render(<LiveWorkspace />);
+    await screen.findByRole('article', { name: 'lecture.png' });
+    await select('lecture.png');
+    await within(A()).findByText('Draft ready');
+    await act(async () => { fireEvent.click(within(region()).getByRole('button', { name: 'Open draft' })); });
+    const body = await within(region()).findByRole('article', { name: 'Notes draft: Binary search' });
+    expect(body).toHaveTextContent('AI-written notes: drafted by AI from your screenshot and not yet checked by you.');
+    expect(body).toHaveTextContent('The last line is cut off');
+    expect(body).not.toHaveTextContent(/Simulated draft|placeholder text/);
+    expect(within(region()).getByText('AI-generated draft · can be wrong')).toBeInTheDocument();
   });
 });

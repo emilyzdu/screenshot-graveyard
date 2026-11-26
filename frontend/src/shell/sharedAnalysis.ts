@@ -1,6 +1,6 @@
 import type { Analysis, ApiResult } from '../api/ai';
 import type { Screenshot, ScreenshotAnalysis } from '../api/client';
-import { suggestFromCategory, type RuleSuggestion } from './nextAction';
+import { suggestNextStep, type RuleSuggestion } from './nextAction';
 
 /** Stable identity of a list-summary analysis (the GET /api/screenshots snapshot). */
 export const summaryKey = (summary: ScreenshotAnalysis) =>
@@ -13,6 +13,7 @@ export function summarize(analysis: Analysis): ScreenshotAnalysis {
     uncertain: analysis.classification.uncertain,
     epitaph: analysis.epitaph.text,
     epitaphOrigin: analysis.epitaph.origin,
+    epitaphProvider: analysis.epitaph.provider ?? null,
   };
 }
 
@@ -114,5 +115,5 @@ export function currentSuggestionRule(authority: AnalysisAuthority, shot: Screen
   const latest = entry?.status === 'success' ? entry.analysis : undefined;
   if (!latest || latest.screenshotId !== shot.screenshotId) return { kind: 'none', reason: CURRENT_ANALYSIS_NEEDED };
   if (summaryKey(summarize(latest)) !== summaryKey(shot.analysis)) return { kind: 'none', reason: CURRENT_ANALYSIS_NEEDED };
-  return suggestFromCategory(latest.classification.category, latest.classification.uncertain);
+  return suggestNextStep(latest.classification);
 }

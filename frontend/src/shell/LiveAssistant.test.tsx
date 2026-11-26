@@ -17,6 +17,8 @@ const ai = vi.hoisted(() => ({
   getProviderMode: vi.fn<() => Promise<ApiResult<ProviderMode>>>(),
   getConsent: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<boolean>>>(),
   setConsent: vi.fn(),
+  // Batch 6A (P1-A): the server's disclosure (Fake by default; real-mode tests override it).
+  getDisclosure: vi.fn(async () => ({ ok: true as const, data: { provider: 'fake' as const, revision: 'fake-test-rev', text: 'This development build uses the Fake AI adapter. Nothing is sent to an external AI provider, and the result is placeholder text that does not read your screenshot.' } })),
   classifyScreenshot: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Accepted>>>(),
   getOperation: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Operation>>>(),
   getAnalysis: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Analysis>>>(),
@@ -47,12 +49,13 @@ const base = (id: number, name: string, analysis: ScreenshotAnalysis | null = nu
   isDuplicate: false, duplicateOf: null, byteSize: 512, uploadedAt: '2026-11-19T20:00:00Z', analysis,
 });
 const summary = (category: string, epitaph: string, extra: Partial<ScreenshotAnalysis> = {}): ScreenshotAnalysis => ({
-  category, uncertain: false, epitaph, epitaphOrigin: 'ai_generate', ...extra,
+  // Batch 6A (P2-E): fixtures record the generating provider, like the server does.
+  category, uncertain: false, epitaph, epitaphOrigin: 'ai_generate', epitaphProvider: 'fake', ...extra,
 });
 const full = (id: number, category: string, epitaph: string, extra: { inferredIntent?: string | null; origin?: string; uncertain?: boolean } = {}): Analysis => ({
   screenshotId: id,
-  classification: { category: category as Analysis['classification']['category'], confidence: 0.75, uncertain: extra.uncertain ?? false, versionNumber: 1, origin: extra.origin ?? 'ai_generate' },
-  epitaph: { text: epitaph, visibleFacts: 'Synthetic adapter does not interpret image content.', inferredIntent: extra.inferredIntent ?? null, uncertain: false, versionNumber: 1, origin: extra.origin ?? 'ai_generate' },
+  classification: { category: category as Analysis['classification']['category'], confidence: 0.75, uncertain: extra.uncertain ?? false, versionNumber: 1, origin: extra.origin ?? 'ai_generate', provider: 'fake' },
+  epitaph: { text: epitaph, visibleFacts: 'Synthetic adapter does not interpret image content.', inferredIntent: extra.inferredIntent ?? null, uncertain: false, versionNumber: 1, origin: extra.origin ?? 'ai_generate', provider: 'fake' },
 });
 const fail = (status: number, code: string): ApiResult<never> => ({ ok: false, status, code, message: code });
 const deferred = <T,>() => { let resolve!: (v: T) => void; const promise = new Promise<T>((r) => { resolve = r; }); return { promise, resolve }; };
@@ -420,5 +423,47 @@ describe('Batch 3B Quiet Assistant', () => {
     expect(expand).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(expand);
     expect(screen.getByTestId('live-assistant')).toBeInTheDocument();
+  });
+});
+
+describe('Batch 6A: the AI next-step suggestion', () => {
+  const withSuggestion = (over: Partial<Analysis['classification']> = {}): Analysis => {
+    const a = full(2, 'Reference/Document', 'A poster for a robotics club meeting.');
+    return { ...a, classification: { ...a.classification, suggestedAction: 'add_calendar', ...over } };
+  };
+
+  it('a real AI suggestion is shown as an AI suggestion that can be wrong, and can be accepted', async () => {
+    ai.getProviderMode.mockResolvedValue({ ok: true, data: 'openai' });
+    ai.getAnalysis.mockImplementation(async (id) => (id === 2 ? { ok: true, data: withSuggestion() } : fail(404, 'not_found')));
+    client.listScreenshots.mockResolvedValue({
+      ok: true, screenshots: [base(2, 'doc.png', summary('Reference/Document', 'A poster for a robotics club meeting.'))],
+    });
+    render(<LiveWorkspace />);
+    await screen.findByRole('article', { name: 'doc.png' });
+    await select('doc.png');
+    const a = assistant();
+    expect(await within(a).findByText('Suggested by AI · can be wrong')).toBeInTheDocument();
+    expect(within(a).getByText(/The AI suggested this from what it saw in the screenshot\. Check that it fits/)).toBeInTheDocument();
+    expect(within(a).queryByText(/not an AI recommendation/)).not.toBeInTheDocument();
+    await act(async () => { fireEvent.click(within(a).getByRole('button', { name: 'Choose Add to Calendar' })); });
+    expect(within(a).getByText('Chosen by you')).toBeInTheDocument();
+    expect(ai.requestEventDraft).not.toHaveBeenCalled(); // choosing never prepares anything
+  });
+
+  it.each([
+    ['the classification is uncertain', { uncertain: true }, /No suggestion\. The classification is marked uncertain/],
+    ['the category was edited by you', { origin: 'manual_edit' }, /No suggestion\. Reference\/Document does not point to one next step/],
+  ] as [string, Partial<Analysis['classification']>, RegExp][])('it is ignored when %s', async (_n, over, text) => {
+    ai.getProviderMode.mockResolvedValue({ ok: true, data: 'openai' });
+    ai.getAnalysis.mockImplementation(async (id) => (id === 2 ? { ok: true, data: withSuggestion(over) } : fail(404, 'not_found')));
+    client.listScreenshots.mockResolvedValue({
+      ok: true,
+      screenshots: [base(2, 'doc.png', summary('Reference/Document', 'A poster for a robotics club meeting.', 'uncertain' in over ? { uncertain: true } : {}))],
+    });
+    render(<LiveWorkspace />);
+    await screen.findByRole('article', { name: 'doc.png' });
+    await select('doc.png');
+    expect(await within(assistant()).findByText(text)).toBeInTheDocument();
+    expect(within(assistant()).queryByText('Suggested by AI · can be wrong')).not.toBeInTheDocument();
   });
 });

@@ -301,7 +301,14 @@ class EventDraftArtifactService:
         ]
         try:
             return EventDraftResult.model_validate(
-                {**values, "missing_fields": missing, "uncertain_fields": uncertain, "references": list(sources)}
+                {
+                    **values,
+                    "missing_fields": missing,
+                    "uncertain_fields": uncertain,
+                    "references": list(sources),
+                    # Not editable: what else the screenshot showed stays recorded.
+                    "other_events": list(base.other_events),
+                }
             )
         except ValidationError as exc:
             raise EventDraftEditValidationError(*_safe_message(exc.errors()[0])) from exc

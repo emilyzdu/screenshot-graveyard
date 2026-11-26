@@ -37,6 +37,7 @@ from app.services.study_note_artifact_service import StudyNoteArtifactService
 from app.services.study_note_service import StudyNoteService
 from app.services.vault_service import VaultService
 from app.storage.file_store import FileStore
+from tests.consent_helpers import current_disclosure
 
 CODE = "def f(x):\r\n\treturn  x  # \u03bb   "
 
@@ -93,7 +94,7 @@ def _shots(s, store, wid, n=3, consent=True):
     ids = [v.upload(png((i * 40, 9, 9)), filename=f"{i}.png").screenshot_id for i in range(n)]
     if consent:
         for sid in ids:
-            ConsentService(s, wid).record_consent(sid, True)
+            ConsentService(s, wid).record_consent(sid, True, disclosure=current_disclosure())
     return ids, v
 
 
@@ -386,7 +387,8 @@ def test_provider_errors_and_timeouts_create_no_version(ctx, raises):
     ad = Recording(raises=raises)
     out, _ = _redo(s, wa, v, aid, ad, "x")
     assert len(ad.study_calls) == 1                         # exactly one call, no retry
-    assert out.operation.status == "failed" and out.operation.error_detail == "AI analysis failed"
+    expected = "AI analysis timed out" if isinstance(raises, AIAdapterTimeoutError) else "AI analysis failed"
+    assert out.operation.status == "failed" and out.operation.error_detail == expected
     assert [r.origin for r in _versions(s, aid)] == ["ai_generate"]
     assert s.get(models.Artifact, aid).current_version_id == cur
 
@@ -630,7 +632,7 @@ def test_a_non_redo_operation_never_reaches_the_provider(ctx, kind):
 def _classified(s, store, wid, color=(5, 6, 7)):
     v = VaultService(s, wid, file_store=store)
     sid = v.upload(png(color), filename="a.png").screenshot_id
-    ConsentService(s, wid).record_consent(sid, True)
+    ConsentService(s, wid).record_consent(sid, True, disclosure=current_disclosure())
     out = ClassificationService(s, wid, adapter=Recording(), vault=v).run_classification(
         sid, _op(s, wid, "classify"))
     assert out.operation.status == "successful"

@@ -20,6 +20,8 @@ const a = vi.hoisted(() => ({
   getProviderMode: vi.fn(),
   getConsent: vi.fn(),
   setConsent: vi.fn(),
+  // Batch 6A (P1-A): the server's disclosure (Fake by default; real-mode tests override it).
+  getDisclosure: vi.fn(async () => ({ ok: true as const, data: { provider: 'fake' as const, revision: 'fake-test-rev', text: 'This development build uses the Fake AI adapter. Nothing is sent to an external AI provider, and the result is placeholder text that does not read your screenshot.' } })),
   classifyScreenshot: vi.fn(),
   getOperation: vi.fn(),
   getAnalysis: vi.fn(),

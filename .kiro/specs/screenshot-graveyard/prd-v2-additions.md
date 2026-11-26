@@ -170,6 +170,40 @@ on exactly what I approved, and nothing I did not approve.
    record. Every approval claim in the UI SHALL come from the server's ledger;
    an unknown outcome SHALL be reported as unknown, with a read-only check.
 
+### Requirement 24: Real vision AI behind a consent-dispatch boundary (P1, Batch 6A)
+
+**User Story:** As a solo user, I want the AI to actually read my screenshot,
+suggest what to do with it and draft notes or a calendar event from it, so that
+I can review, correct and approve something grounded in the image, while
+nothing is sent without my consent.
+
+1. THE System SHALL send a screenshot's original bytes to a real provider only
+   after an authorization, under the workspace write lock, that finds consent
+   granted FOR THAT PROVIDER for every source at that instant. Consent changes
+   take the same lock. A Fake-mode grant SHALL NOT authorize a real provider.
+2. A result SHALL be saved only if consent is still granted at the same
+   consent version as when the request was authorized; otherwise it is
+   discarded and the operation fails. No database transaction SHALL be held
+   during the provider call. Revocation SHALL be described as stopping new
+   requests, not recalling one already sent.
+3. THE real adapter SHALL use provider-facing schemas limited to the provider's
+   supported structured-output subset, then validate into the internal models
+   (lengths, categories, dates, IANA zones, DST, consistency). Source
+   references SHALL be assigned by the backend, never by the model.
+4. Screenshot text SHALL be treated as untrusted data. The adapter SHALL never
+   invent a date, year, time, time zone or location: a date without a year, a
+   time without a zone, an unknown zone or a non-existent local time is left
+   missing and quoted in the description; a repeated local time is marked
+   uncertain. Several visible events SHALL NOT be merged: the draft covers the
+   first and lists the others (`other_events`).
+5. The classification MAY carry an AI next-step suggestion (`make_notes` or
+   `add_calendar`), shown as an AI suggestion; it is dropped when the user
+   corrects the category, and ignored when the classification is uncertain.
+6. Provider failures (timeout, rate limit, refusal, truncation, malformed
+   output) SHALL produce a failed operation with a generic detail and no saved
+   data. Missing or invalid real-provider configuration SHALL fail closed,
+   never fall back to the Fake AI. No external delivery is added.
+
 ### Open conflict: external destination for a future calendar delivery
 Requirement 21 adds no external write. A later Google Calendar delivery
 (planned as "Batch 6") would conflict with existing requirements that are NOT
@@ -244,6 +278,13 @@ refer to existing task numbers where relevant.
   - **Acceptance test:** backend tests for creation, idempotency, two-connection races (approve/approve and approve/edit), stale versions and Redo, eligibility and acknowledgements, cross-workspace and wrong-kind, tampered data, archived sources, rollback, insert-only ledger, no AI or network; frontend tests for explicit confirmation, historical and older approvals, unknown outcomes, conflicts and The Crypt; an isolated browser run with Fake AI.
   - **Priority:** P1
 
+- [ ] A.11 `[P1]` Real vision AI behind a consent-dispatch boundary (Batch 6A)
+  - Implements tasks.md 7.1 (`ai_dispatch` ledger, consent version and provider, migration `c6a1d15a0001`) and completes the OpenAI Responses adapter (wire schemas, Calendar drafts, AI next-step suggestion, `other_events`). Enables Revive and Prepare in the Gothic workspace for the real provider with an explicit disclosure. No delivery.
+  - **Dependencies:** A.8, A.9, A.10, 7.1
+  - **Requirements:** 24.1 to 24.6, 9.2, 9.4, INV-4, INV-7
+  - **Acceptance test:** deterministic consent/dispatch race tests on two real SQLite connections for every worker; mocked-SDK adapter contract tests (wire-schema keyword whitelist, failures, Calendar mapping); HTTP integration with the real adapter and a scripted client; frontend tests for real-mode disclosure, AI suggestion and other events; an isolated browser run. Live provider smoke test only when a key is available.
+  - **Priority:** P1
+
 ## Dependency-aware plan
 
 ```
@@ -263,7 +304,8 @@ Wave 5 (A.5). A.7 starts only after the PRD is re-supplied and A.4 is stable.
 | A.7 intent inference and tool planning | Planned, deferred, not implemented |
 | A.8 calendar event draft (internal draft only) | Implemented in Batch 4B |
 | A.9 review, edit and version history | Implemented in Batch 5A |
-| A.10 version-specific approval and approval ledger | Implemented in Batch 5B, pending review |
+| A.10 version-specific approval and approval ledger | Implemented in Batch 5B |
+| A.11 real vision AI behind a consent-dispatch boundary | Implemented in Batch 6A, pending review; live provider not verified without a key |
 
 ## Addendum: updates after reading the real PRD v2.0
 

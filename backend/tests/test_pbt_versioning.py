@@ -36,6 +36,7 @@ from app.services.study_note_artifact_service import StudyNoteArtifactService
 from app.services.study_note_service import StudyNoteService
 from app.services.vault_service import VaultService
 from app.storage.file_store import FileStore
+from tests.consent_helpers import current_disclosure
 
 
 PBT = settings(
@@ -108,7 +109,7 @@ def _make_note(env, ordered_colors: list[int]) -> tuple[int, list[int]]:
             for index, color in enumerate(ordered_colors)
         ]
         for screenshot_id in ids:
-            ConsentService(session, env.workspace_id).record_consent(screenshot_id, True)
+            ConsentService(session, env.workspace_id).record_consent(screenshot_id, True, disclosure=current_disclosure())
         operation_id = OperationService(session, env.workspace_id).create_pending("study_note").operation_id
         outcome = StudyNoteService(session, env.workspace_id, adapter=adapter, vault=vault).run_generation(ids, operation_id)
         assert outcome.operation.status == "successful" and outcome.artifact_id is not None
@@ -119,7 +120,7 @@ def _make_analysis(env) -> tuple[int, int, int]:
     with Session(env.engine) as session:
         vault = VaultService(session, env.workspace_id, file_store=env.store)
         screenshot_id = vault.upload(_png((33, 44, 55)), filename="analysis.png").screenshot_id
-        ConsentService(session, env.workspace_id).record_consent(screenshot_id, True)
+        ConsentService(session, env.workspace_id).record_consent(screenshot_id, True, disclosure=current_disclosure())
         operation_id = OperationService(session, env.workspace_id).create_pending("classify").operation_id
         outcome = ClassificationService(session, env.workspace_id, adapter=_RecordingAdapter(), vault=vault).run_classification(screenshot_id, operation_id)
         assert outcome.operation.status == "successful"

@@ -6,7 +6,7 @@
 // the HTTP status and server error code so the UI can distinguish consent (403),
 // quota (429), not-found (404) and outages (503) without guessing.
 
-import { normalizeAnalysisOrigin } from './analysisOrigin';
+import { normalizeAnalysisOrigin, normalizeResultProvider, type ResultProvider } from './analysisOrigin';
 import { OPERATION_KIND_BY_ACTION, type PreparationAction } from './preparationKinds';
 
 export interface ApiFailure {
@@ -44,6 +44,7 @@ export interface Operation {
 export interface Accepted extends Operation {
   warning: string | null;
 }
+export type SuggestedAction = 'make_notes' | 'add_calendar';
 export interface Analysis {
   screenshotId: number;
   classification: {
@@ -52,6 +53,14 @@ export interface Analysis {
     uncertain: boolean;
     versionNumber: number;
     origin: string;
+    /**
+     * Batch 6A: the AI's suggested next step for this classification version,
+     * from what it saw in the screenshot. `null` when there is none (always for
+     * the Fake AI, and after the user corrects the category).
+     */
+    suggestedAction?: SuggestedAction | null;
+    /** Batch 6A (P2-E): who generated THIS version; `null` = not recorded or written by you. */
+    provider?: ResultProvider;
   };
   epitaph: {
     text: string;
@@ -60,6 +69,7 @@ export interface Analysis {
     uncertain: boolean;
     versionNumber: number;
     origin: string;
+    provider?: ResultProvider;
   };
 }
 export interface StudyNoteContent {
@@ -196,6 +206,9 @@ function parseAnalysis(b: unknown, screenshotId: number): Analysis | null {
       uncertain: c.uncertain,
       versionNumber: c.versionNumber,
       origin: normalizeAnalysisOrigin(c.origin),
+      // Advisory only: anything unrecognised is treated as no suggestion, never guessed.
+      suggestedAction: c.suggestedAction === 'make_notes' || c.suggestedAction === 'add_calendar' ? c.suggestedAction : null,
+      provider: normalizeResultProvider(c.provider),
     },
     epitaph: {
       text: e.text,
@@ -204,6 +217,7 @@ function parseAnalysis(b: unknown, screenshotId: number): Analysis | null {
       uncertain: e.uncertain,
       versionNumber: e.versionNumber,
       origin: normalizeAnalysisOrigin(e.origin),
+      provider: normalizeResultProvider(e.provider),
     },
   };
 }
@@ -282,10 +296,35 @@ export function getProviderMode(f: Fetch = fetch) {
   return call('/api/ai/provider-mode', {}, (b): ProviderMode | null =>
     isObj(b) && (b.mode === 'fake' || b.mode === 'openai') ? b.mode : null, f);
 }
-export function setConsent(id: number, granted: boolean, f: Fetch = fetch) {
+/**
+ * Batch 6A (P1-A): the server's AI processing disclosure. It is shown to the
+ * user verbatim, and a grant must echo its `provider` and `revision`.
+ */
+export interface Disclosure {
+  provider: ProviderMode;
+  revision: string;
+  text: string;
+}
+export function getDisclosure(f: Fetch = fetch) {
+  return call('/api/ai/disclosure', {}, (b): Disclosure | null =>
+    isObj(b) && (b.provider === 'fake' || b.provider === 'openai') && typeof b.revision === 'string' && b.revision.length > 0 &&
+    typeof b.text === 'string' && b.text.length > 0
+      ? { provider: b.provider, revision: b.revision, text: b.text }
+      : null, f);
+}
+/**
+ * Record consent. A GRANT carries the provider and revision of the disclosure
+ * the user was shown; without one it is refused by the server (409
+ * `disclosure_changed`), which is never retried automatically. Withdrawing
+ * needs no disclosure.
+ */
+export function setConsent(id: number, granted: boolean, f: Fetch = fetch, shown?: Pick<Disclosure, 'provider' | 'revision'>) {
   return call(
     `/api/screenshots/${id}/consent`,
-    { method: 'POST', json: { granted } },
+    {
+      method: 'POST',
+      json: granted && shown ? { granted, provider: shown.provider, disclosureRevision: shown.revision } : { granted },
+    },
     (b) => (isObj(b) && typeof b.granted === 'boolean' ? b.granted : null),
     f,
   );
@@ -444,6 +483,11 @@ export interface EventDraftContent {
   missingFields: EventDraftField[];
   uncertainFields: EventDraftField[];
   references: number[];
+  /**
+   * Batch 6A: other events visible in the same screenshot that this draft does
+   * not cover (short labels). Shown so nothing is silently dropped.
+   */
+  otherEvents?: string[];
 }
 
 export interface EventDraftVersion {
@@ -507,6 +551,10 @@ function parseEventDraft(b: unknown): EventDraftVersion | null {
   // A missing field must really be empty: never show a value the server called unknown.
   const content = c as Record<EventDraftField, unknown>;
   if (c.missing_fields.some((f) => content[f] !== null)) return null;
+  const otherEvents = c.other_events === undefined ? [] : c.other_events;
+  if (!Array.isArray(otherEvents) || otherEvents.length > 10 || !otherEvents.every((x) => typeof x === 'string' && x.length > 0)) {
+    return null;
+  }
   return {
     artifactId: b.artifactId,
     versionId: b.versionId,
@@ -527,6 +575,7 @@ function parseEventDraft(b: unknown): EventDraftVersion | null {
       missingFields: c.missing_fields,
       uncertainFields: c.uncertain_fields,
       references: c.references,
+      otherEvents: otherEvents as string[],
     },
   };
 }

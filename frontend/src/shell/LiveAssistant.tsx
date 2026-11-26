@@ -1,6 +1,6 @@
 import type { ProviderMode } from '../api/ai';
 import type { Screenshot } from '../api/client';
-import { describeEpitaphAuxiliaryOrigin, describeOrigin } from '../ai/messages';
+import { describeAuxiliaryResultOrigin, describeResultOrigin } from '../ai/messages';
 import { getReviveEntry, getReviveSuccess } from '../ai/reviveCoordinator';
 import { Ghost } from '../ui/Ghost';
 import { Icon } from '../ui/Icon';
@@ -196,7 +196,7 @@ function OneScreenshot({
         <div className="sg-live-analysis__head">
           <span className="sg-result__category">{category}</span>
           {!full && <Badge tone={summary.epitaphOrigin === 'manual_edit' ? 'green' : 'muted'}>
-            {epitaphProvenanceLabel(summary.epitaphOrigin, providerMode)}
+            {epitaphProvenanceLabel(summary.epitaphOrigin, summary.epitaphProvider ?? null)}
           </Badge>}
           {classUncertain && <Badge tone="muted">Marked uncertain</Badge>}
         </div>
@@ -231,21 +231,21 @@ function OneScreenshot({
               <dt>Visible facts</dt>
               <dd>
                 {full.epitaph.visibleFacts || 'None recorded.'}
-                {full.epitaph.visibleFacts && <small className="sg-muted"> ({describeEpitaphAuxiliaryOrigin(full.epitaph.origin, providerMode)})</small>}
+                {full.epitaph.visibleFacts && <small className="sg-muted"> ({describeAuxiliaryResultOrigin(full.epitaph.origin, full.epitaph.provider ?? null)})</small>}
               </dd>
               {full.epitaph.inferredIntent !== null && full.epitaph.inferredIntent !== '' && (
                 <>
                   <dt>Possible reason</dt>
                   <dd>
                     {full.epitaph.inferredIntent} (a guess, not a fact)
-                    <small className="sg-muted"> ({describeEpitaphAuxiliaryOrigin(full.epitaph.origin, providerMode)})</small>
+                    <small className="sg-muted"> ({describeAuxiliaryResultOrigin(full.epitaph.origin, full.epitaph.provider ?? null)})</small>
                   </dd>
                 </>
               )}
               <dt>Source</dt>
               <dd>
-                Category {describeOrigin(full.classification.origin, providerMode)}; Epitaph{' '}
-                {describeOrigin(full.epitaph.origin, providerMode)}.
+                Category {describeResultOrigin(full.classification.origin, full.classification.provider ?? null)}; Epitaph{' '}
+                {describeResultOrigin(full.epitaph.origin, full.epitaph.provider ?? null)}.
               </dd>
             </>
           )}
@@ -267,10 +267,13 @@ function OneScreenshot({
         ) : rule.kind === 'suggest' ? (
           <div className="sg-next__suggested" role="status">
             <p>
-              <Badge tone="violet">Suggested · rule-based</Badge> <b>{LIVE_ACTIONS[rule.action].label}</b>
+              <Badge tone="violet">{rule.source === 'ai' ? 'Suggested by AI · can be wrong' : 'Suggested · rule-based'}</Badge>{' '}
+              <b>{LIVE_ACTIONS[rule.action].label}</b>
             </p>
             <p className="sg-muted">
-              {rule.reason} This is a fixed rule in this app, not an AI recommendation.
+              {rule.source === 'ai'
+                ? `${rule.reason} Check that it fits before you choose it.`
+                : `${rule.reason} This is a fixed rule in this app, not an AI recommendation.`}
             </p>
           </div>
         ) : (

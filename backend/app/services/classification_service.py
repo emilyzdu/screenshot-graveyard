@@ -50,9 +50,15 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
-from app.ai.adapter import AIAdapter, AIAdapterError
+from app.ai.adapter import AIAdapter, adapter_failure_detail
 from app.ai.redo_instructions import RedoInstructionsError, normalize_redo_instructions
-from app.ai.schemas import ClassificationResult
+from app.ai.schemas import ClassificationResult, allowed_suggestion
+from app.services.ai_dispatch_service import (
+    AIDispatchService,
+    DispatchDeniedError,
+    DispatchSupersededError,
+    DispatchTicket,
+)
 from app.services.analysis_service import (
     AnalysisNotFoundError,
     AnalysisService,
@@ -62,6 +68,7 @@ from app.services.artifact_version_service import ORIGIN_AI_REDO, ArtifactVersio
 from app.services.consent_service import (
     ConsentRequiredError,
     ConsentService,
+    ConsentServiceUnavailableError,
     ScreenshotNotFoundError as ConsentScreenshotNotFoundError,
 )
 from app.services.operation_service import (
@@ -117,6 +124,10 @@ class ClassificationService:
         self._vault = vault or VaultService(session, workspace_id)
         self._repo = self._operations._repo  # workspace-scoped repository
         self._versions = ArtifactVersionService(session, workspace_id)
+        self._dispatch = AIDispatchService(session, workspace_id)
+        # P2-E: recorded on every version this service writes (None = unknown,
+        # e.g. a test double without an identity).
+        self._provider = getattr(adapter, "provider_id", None)
 
     def run_classification(
         self, screenshot_id: int, operation_id: int
@@ -129,17 +140,16 @@ class ClassificationService:
         operation transition.
         """
         # 1-4) Consent re-check, read, ONE adapter call, strict validation.
-        result = self._authorize_and_classify(screenshot_id, operation_id, None)
-        if isinstance(result, ClassificationOutcome):
-            return result
+        authorized = self._authorize_and_classify(screenshot_id, operation_id, None)
+        if isinstance(authorized, ClassificationOutcome):
+            return authorized
+        result, ticket = authorized
 
         # 5) Explicit uncertainty -> operation `uncertain`, NO artifacts persisted.
         #    Distinguishable from both confident success and malformed data (P13).
         if result.uncertain:
-            op = self._operations.set_terminal_status(
-                operation_id, "uncertain", error_detail="AI result uncertain"
-            )
-            return ClassificationOutcome(operation=op)
+            self._dispatch.discard(ticket)
+            return ClassificationOutcome(operation=self._terminal(operation_id, "uncertain", "AI result uncertain"))
 
         # 6) Confident, valid result -> atomic co-persistence (P14). The callback
         #    only flushes; `complete_after_persistence` commits the artifacts AND
@@ -151,10 +161,10 @@ class ClassificationService:
             epi_art = self._repo.create_artifact(kind=_KIND_EPITAPH)
             # Version 1 + current pointer via the shared append-only boundary.
             self._versions.create_first_version(
-                class_art.id, self._classification_json(result), _ORIGIN_AI_GENERATE
+                class_art.id, self._classification_json(result, self._provider), _ORIGIN_AI_GENERATE
             )
             self._versions.create_first_version(
-                epi_art.id, self._epitaph_json(result), _ORIGIN_AI_GENERATE
+                epi_art.id, self._epitaph_json(result, self._provider), _ORIGIN_AI_GENERATE
             )
             # Provenance: both artifacts reference the source screenshot (INV-7).
             self._repo.add_source_reference(
@@ -167,9 +177,13 @@ class ClassificationService:
             created["epitaph_artifact_id"] = epi_art.id
 
         try:
-            op = self._operations.complete_after_persistence(operation_id, _persist)
-        except OperationPersistenceError:
-            # Atomic rollback already occurred; a fresh `failed` was recorded.
+            op = self._operations.complete_after_persistence(
+                operation_id, _persist, guard=lambda: self._dispatch.verify_for_persistence(ticket)
+            )
+        except (OperationPersistenceError, OperationTransitionError):
+            # Atomic rollback already occurred; a fresh `failed` was recorded
+            # (or another worker's terminal result stands).
+            self._dispatch.discard(ticket)
             op = self._operations.get(operation_id)
             return ClassificationOutcome(operation=op)
 
@@ -179,64 +193,52 @@ class ClassificationService:
             epitaph_artifact_id=created.get("epitaph_artifact_id"),
         )
 
+    def _terminal(self, operation_id: int, status: str, detail: str) -> OperationState:
+        try:
+            return self._operations.set_terminal_status(operation_id, status, error_detail=detail)
+        except OperationTransitionError:
+            return self._operations.get(operation_id)
+
     def _authorize_and_classify(
         self, screenshot_id: int, operation_id: int, instructions: str | None
-    ) -> "ClassificationResult | ClassificationOutcome":
+    ) -> "tuple[ClassificationResult, DispatchTicket] | ClassificationOutcome":
         """Shared by initial classification and AI Redo (Task 3.3).
 
-        Returns the validated result, or the already-recorded terminal outcome on
-        any failure. ``instructions`` (Redo only) is passed to the adapter as an
-        explicit keyword; initial classification keeps the two-argument call.
+        Returns the validated result with its dispatch ticket, or the
+        already-recorded terminal outcome on any failure. ``instructions`` (Redo
+        only) is passed to the adapter as an explicit keyword; initial
+        classification keeps the two-argument call.
         """
-        # 1) Consent RE-CHECK immediately before any adapter work. If consent was
-        #    revoked (or never granted) between enqueue and now, the adapter is
-        #    never called and the operation fails safely. Foreign/missing is
-        #    non-disclosing.
+        # 1) Early consent check before any bytes are read (fast fail). The
+        #    authoritative check is the dispatch authorization in step 3.
         try:
             self._consent.require_consent(screenshot_id)
         except ConsentRequiredError:
-            op = self._operations.set_terminal_status(
-                operation_id, "failed", error_detail="AI processing consent required"
-            )
-            return ClassificationOutcome(operation=op)
+            return ClassificationOutcome(operation=self._terminal(operation_id, "failed", "AI processing consent required"))
         except ConsentScreenshotNotFoundError:
-            op = self._operations.set_terminal_status(
-                operation_id, "failed", error_detail="Not found"
-            )
-            return ClassificationOutcome(operation=op)
+            return ClassificationOutcome(operation=self._terminal(operation_id, "failed", "Not found"))
+        except ConsentServiceUnavailableError:
+            return ClassificationOutcome(operation=self._terminal(operation_id, "failed", "AI processing unavailable"))
 
         # 2) Read the ORIGINAL bytes (pure read; never mutates — INV-1).
         try:
             original = self._vault.read_original(screenshot_id)
         except (VaultScreenshotNotFoundError, VaultServiceError):
-            op = self._operations.set_terminal_status(
-                operation_id, "failed", error_detail="Not found"
-            )
-            return ClassificationOutcome(operation=op)
+            return ClassificationOutcome(operation=self._terminal(operation_id, "failed", "Not found"))
 
-        # Reading local bytes can take enough time for a user to revoke consent.
-        # Re-check immediately before the only external-facing boundary so no
-        # revoked screenshot reaches an adapter after that queue/read window.
+        # 3) Dispatch authorization (Batch 6A, tasks.md 7.1): ONE short locked
+        #    transaction re-reads consent, records the heartbeat and the dispatch.
+        #    It is the last statement before the adapter call; no database write
+        #    or transaction sits between them. A withdrawal committed before it
+        #    means no adapter call at all.
         try:
-            self._consent.require_consent(screenshot_id)
-        except ConsentRequiredError:
-            op = self._operations.set_terminal_status(
-                operation_id, "failed", error_detail="AI processing consent required"
-            )
-            return ClassificationOutcome(operation=op)
-        except ConsentScreenshotNotFoundError:
-            op = self._operations.set_terminal_status(
-                operation_id, "failed", error_detail="Not found"
-            )
-            return ClassificationOutcome(operation=op)
-
-        # 3) EXACTLY ONE adapter call. Timeouts/adapter errors -> failed, no artifacts.
-        # Heartbeat immediately before the external-facing boundary so queued
-        # work is not mistaken for a crashed worker by stale recovery.
-        try:
-            self._operations.heartbeat_pending(operation_id)
-        except OperationTransitionError:
+            ticket = self._dispatch.authorize(operation_id, [screenshot_id], adapter_provider=getattr(self._adapter, "provider_id", None))
+        except DispatchSupersededError:
             return ClassificationOutcome(operation=self._operations.get(operation_id))
+        except DispatchDeniedError as exc:
+            return ClassificationOutcome(operation=self._terminal(operation_id, "failed", exc.detail))
+
+        # 4) EXACTLY ONE adapter call. From here the request may have been sent.
         try:
             if instructions is None:
                 raw = self._adapter.classify_and_epitaph(original.data, original.mime_type)
@@ -244,13 +246,11 @@ class ClassificationService:
                 raw = self._adapter.classify_and_epitaph(
                     original.data, original.mime_type, instructions=instructions
                 )
-        except AIAdapterError:
-            op = self._operations.set_terminal_status(
-                operation_id, "failed", error_detail="AI analysis failed"
-            )
-            return ClassificationOutcome(operation=op)
+        except Exception as exc:
+            self._dispatch.discard(ticket)
+            return ClassificationOutcome(operation=self._terminal(operation_id, "failed", adapter_failure_detail(exc)))
 
-        # 4) Validate at the boundary (do NOT trust the return annotation). A fake
+        # 5) Validate at the boundary (do NOT trust the return annotation). A fake
         #    or real adapter returning malformed data is rejected here (P12).
         try:
             # Pydantic trusts an instance of the target model by default.
@@ -260,12 +260,10 @@ class ClassificationService:
             payload = raw.model_dump() if isinstance(raw, BaseModel) else raw
             result = ClassificationResult.model_validate(payload)
         except (ValidationError, TypeError, ValueError):
-            op = self._operations.set_terminal_status(
-                operation_id, "failed", error_detail="AI output failed validation"
-            )
-            return ClassificationOutcome(operation=op)
+            self._dispatch.discard(ticket)
+            return ClassificationOutcome(operation=self._terminal(operation_id, "failed", "AI output failed validation"))
 
-        return result
+        return result, ticket
 
     def run_redo(
         self, screenshot_id: int, operation_id: int, instructions: str | None
@@ -319,30 +317,32 @@ class ClassificationService:
             return ClassificationOutcome(operation=op)
 
         # 2-4) Consent re-check, read, ONE adapter call, strict validation.
-        result = self._authorize_and_classify(screenshot_id, operation_id, instructions)
-        if isinstance(result, ClassificationOutcome):
-            return result
+        authorized = self._authorize_and_classify(screenshot_id, operation_id, instructions)
+        if isinstance(authorized, ClassificationOutcome):
+            return authorized
+        result, ticket = authorized
 
         # 5) Explicit uncertainty: nothing is persisted; prior versions untouched.
         if result.uncertain:
-            op = self._operations.set_terminal_status(
-                operation_id, "uncertain", error_detail="AI result uncertain"
-            )
-            return ClassificationOutcome(operation=op)
+            self._dispatch.discard(ticket)
+            return ClassificationOutcome(operation=self._terminal(operation_id, "uncertain", "AI result uncertain"))
 
         # 6) Atomic: both new versions + pointers + operation status, or nothing.
         def _persist() -> int:
             self._versions.append_version(
-                class_id, self._classification_json(result), ORIGIN_AI_REDO
+                class_id, self._classification_json(result, self._provider), ORIGIN_AI_REDO
             )
             self._versions.append_version(
-                epi_id, self._epitaph_json(result), ORIGIN_AI_REDO
+                epi_id, self._epitaph_json(result, self._provider), ORIGIN_AI_REDO
             )
             return class_id
 
         try:
-            op = self._operations.complete_after_persistence(operation_id, _persist)
+            op = self._operations.complete_after_persistence(
+                operation_id, _persist, guard=lambda: self._dispatch.verify_for_persistence(ticket)
+            )
         except (OperationPersistenceError, OperationTransitionError):
+            self._dispatch.discard(ticket)
             return ClassificationOutcome(operation=self._operations.get(operation_id))
         return ClassificationOutcome(
             operation=op, classification_artifact_id=class_id, epitaph_artifact_id=epi_id
@@ -351,30 +351,39 @@ class ClassificationService:
     # ------------------------------------------------------------- serializers
 
     @staticmethod
-    def _classification_json(result: ClassificationResult) -> str:
+    def _classification_json(result: ClassificationResult, provider: str | None = None) -> str:
         """Serialize the classification payload for the versioned artifact.
 
         Stores the category (the six-value enum's value), confidence, and the
         uncertain flag. The Epitaph is persisted as its OWN artifact (P14), not
         embedded here.
         """
-        return json.dumps(
-            {
-                "category": result.category.value,
-                "confidence": result.confidence,
-                "uncertain": result.uncertain,
-            }
-        )
+        payload = {
+            "category": result.category.value,
+            "confidence": result.confidence,
+            "uncertain": result.uncertain,
+        }
+        # Batch 6A: stored only when the adapter made a suggestion, so Fake AI
+        # payloads are byte-for-byte unchanged.
+        # P2-D: never persist a suggestion the category does not allow.
+        suggestion = allowed_suggestion(result.category, result.uncertain, result.suggested_action)
+        if suggestion is not None:
+            payload["suggested_action"] = suggestion
+        # P2-E: the provider that generated THIS version (never the current mode).
+        if provider is not None:
+            payload["provider"] = provider
+        return json.dumps(payload)
 
     @staticmethod
-    def _epitaph_json(result: ClassificationResult) -> str:
+    def _epitaph_json(result: ClassificationResult, provider: str | None = None) -> str:
         """Serialize the Epitaph payload, preserving `visible_facts` exactly."""
         epi = result.epitaph
-        return json.dumps(
-            {
-                "text": epi.text,
-                "visible_facts": epi.visible_facts,
-                "inferred_intent": epi.inferred_intent,
-                "uncertain": epi.uncertain,
-            }
-        )
+        payload = {
+            "text": epi.text,
+            "visible_facts": epi.visible_facts,
+            "inferred_intent": epi.inferred_intent,
+            "uncertain": epi.uncertain,
+        }
+        if provider is not None:
+            payload["provider"] = provider  # P2-E
+        return json.dumps(payload)

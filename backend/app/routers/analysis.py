@@ -49,6 +49,10 @@ def _view_dict(v) -> dict:
             "uncertain": v.uncertain,
             "versionNumber": v.classification_version_number,
             "origin": v.classification_origin,
+            # Batch 6A: the AI's suggested next step, or null (always null for Fake AI).
+            "suggestedAction": v.suggested_action,
+            # P2-E: who generated THIS version; null = not recorded / written by you.
+            "provider": v.classification_provider,
         },
         "epitaph": {
             "text": v.epitaph_text,
@@ -57,6 +61,7 @@ def _view_dict(v) -> dict:
             "uncertain": v.epitaph_uncertain,
             "versionNumber": v.epitaph_version_number,
             "origin": v.epitaph_origin,
+            "provider": v.epitaph_provider,
         },
     }
 

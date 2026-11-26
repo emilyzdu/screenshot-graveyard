@@ -1,4 +1,4 @@
-import { isAIAnalysisOrigin } from '../api/analysisOrigin';
+import { isAIAnalysisOrigin, type ResultProvider } from '../api/analysisOrigin';
 
 /**
  * Next-action vocabulary and the conservative category → action rule for the
@@ -36,7 +36,7 @@ export type BackendCategory =
   | 'Potentially Sensitive';
 
 export type RuleSuggestion =
-  | { kind: 'suggest'; action: LiveActionId; reason: string }
+  | { kind: 'suggest'; action: LiveActionId; reason: string; source?: 'rule' | 'ai' }
   | { kind: 'none'; reason: string };
 
 const RULE: Record<BackendCategory, RuleSuggestion> = {
@@ -70,6 +70,46 @@ export function suggestFromCategory(category: string, uncertain: boolean): RuleS
 }
 
 /**
+ * Batch 6A (P2-D): categories that never get a suggested next step, from the
+ * AI or the rule. Same policy as the server (`SUGGESTION_BLOCKED_CATEGORIES`):
+ * an unknown classification must be checked by the user, and a possibly
+ * sensitive one is never pushed toward an action. Applied here too, so an old
+ * or malformed API answer cannot surface one.
+ */
+const SUGGESTION_BLOCKED: ReadonlySet<string> = new Set<BackendCategory>(['Unknown/Needs Review', 'Potentially Sensitive']);
+export function aiSuggestionAllowed(category: string): boolean {
+  return Object.prototype.hasOwnProperty.call(RULE, category) && !SUGGESTION_BLOCKED.has(category);
+}
+
+/**
+ * Batch 6A: the real provider may suggest a next step from what it saw (e.g. a
+ * visible event date -> Add to Calendar). That suggestion is used only when it
+ * belongs to an AI-written classification that is not uncertain; it is labelled
+ * as an AI suggestion. Otherwise the fixed category rule above applies.
+ */
+export function suggestNextStep(c: {
+  category: string;
+  uncertain: boolean;
+  origin: unknown;
+  suggestedAction?: 'make_notes' | 'add_calendar' | null;
+}): RuleSuggestion {
+  if (
+    !c.uncertain &&
+    isAIAnalysisOrigin(c.origin) &&
+    aiSuggestionAllowed(c.category) &&
+    (c.suggestedAction === 'make_notes' || c.suggestedAction === 'add_calendar')
+  ) {
+    return {
+      kind: 'suggest',
+      action: c.suggestedAction,
+      reason: 'The AI suggested this from what it saw in the screenshot.',
+      source: 'ai',
+    };
+  }
+  return suggestFromCategory(c.category, c.uncertain);
+}
+
+/**
  * The user's choice for one screenshot. Transient UI state for Batch 3B: held by
  * LiveWorkspace for the page's lifetime, never sent to the server, and lost on
  * reload. `basis` records whether the user accepted the rule's suggestion or
@@ -88,10 +128,11 @@ export interface ActionChoice {
  * this label must never be read as describing the category; it is prefixed
  * "Epitaph:" for that reason. Field-level origins come only from GET /analysis.
  */
-export function epitaphProvenanceLabel(epitaphOrigin: unknown, mode: 'fake' | 'openai' | 'unknown'): string {
+export function epitaphProvenanceLabel(epitaphOrigin: unknown, provider: ResultProvider): string {
+  // Batch 6A (P2-E): the provider recorded on the stored version, never the current mode.
   if (epitaphOrigin === 'manual_edit') return 'Epitaph: edited by you';
   if (!isAIAnalysisOrigin(epitaphOrigin)) return 'Epitaph: source unconfirmed';
-  if (mode === 'fake') return 'Epitaph: simulated (Fake AI)';
-  if (mode === 'openai') return 'Epitaph: AI result · can be wrong';
-  return 'Epitaph: source unconfirmed';
+  if (provider === 'fake') return 'Epitaph: simulated (Fake AI)';
+  if (provider === 'openai') return 'Epitaph: AI result · can be wrong';
+  return 'Epitaph: AI result · unknown provider';
 }

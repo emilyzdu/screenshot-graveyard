@@ -9,6 +9,7 @@ import {
 import { imageUrl, type Screenshot } from '../api/client';
 import { describeOperationOutcome, describeRequestFailure } from './messages';
 import { PrivacyNotice, useProviderStatus } from './PrivacyNotice';
+import { DISCLOSURE_CHANGED_TEXT, grantableDisclosure, useDisclosure } from './useDisclosure';
 import { StatusBadge } from './StatusBadge';
 import { StudyNoteView } from './StudyNoteView';
 import {
@@ -49,7 +50,10 @@ export function StudyNotesPanel({
   const [message, setMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
   const [serverWarning, setServerWarning] = useState<string | null>(null);
   const { state: poll, start, reset } = useOperationPolling(pollIntervalMs, maxPolls);
-  const { mode: providerMode, loading: providerLoading } = useProviderStatus();
+  const { mode: providerMode, loading: providerLoading, refresh: refreshProvider } = useProviderStatus();
+  // P1-A: the server's disclosure, shown verbatim; a grant echoes exactly this one.
+  const { state: disclosureState, recover: recoverDisclosure } = useDisclosure();
+  const shownDisclosure = grantableDisclosure(disclosureState, providerMode);
 
   const byId = new Map(screenshots.map((s) => [s.screenshotId, s]));
   const nameOf = (id: number) => byId.get(id)?.originalFilename || `Screenshot #${id}`;
@@ -163,11 +167,17 @@ export function StudyNotesPanel({
   const onAuthorize = () =>
     guarded(async () => {
       setMessage(null);
+      if (!shownDisclosure) return; // never grant without the disclosure on screen
       let failed = 0;
       for (const id of ungranted) {
-        const res = await setConsent(id, true);
+        const res = await setConsent(id, true, fetch, shownDisclosure);
         if (res.ok) setConsentMap((m) => ({ ...m, [id]: true }));
-        else failed += 1;
+        else if (res.status === 409 && res.code === 'disclosure_changed') {
+          // Stop: the rest would be refused too. Nothing is re-sent automatically.
+          setMessage({ kind: 'error', text: DISCLOSURE_CHANGED_TEXT });
+          void recoverDisclosure(refreshProvider); // provider + disclosure, as a pair
+          return;
+        } else failed += 1;
       }
       setMessage(
         failed === 0
@@ -293,11 +303,20 @@ export function StudyNotesPanel({
             {sub(ungranted.length)} still need your permission before anything is
             processed.
           </p>
+          <p className="ai-hint" data-testid="ai-disclosure">
+            {shownDisclosure
+              ? shownDisclosure.text
+              : disclosureState.t === 'error'
+                ? 'The AI processing disclosure could not be loaded, so consent cannot be given right now.'
+                : disclosureState.t === 'loading'
+                ? 'Loading the AI processing disclosure\u2026'
+                : 'The AI provider changed while this was being checked, so consent cannot be given yet. Close and reopen to check again.'}
+          </p>
           <button
             type="button"
             className="gy-btn gy-btn--revive"
             onClick={onAuthorize}
-            disabled={busy || providerMode === 'unknown'}
+            disabled={busy || providerMode === 'unknown' || !shownDisclosure}
           >
             {authorizeLabel}
           </button>

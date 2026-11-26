@@ -176,15 +176,36 @@ explicit and fails closed if configuration is absent or invalid:
 
 ```sh
 export AI_PROVIDER=openai
-export OPENAI_API_KEY='replace-with-your-server-side-key'
-export OPENAI_MODEL='replace-with-a-supported-vision-model'
+export OPENAI_API_KEY='replace-with-your-server-side-key'   # server only; never in the frontend
+export OPENAI_MODEL='gpt-4.1-mini'                          # default; any vision model with Structured Outputs
+# Only for reasoning models such as gpt-6-luna (omit for gpt-4.1-mini):
+# export OPENAI_REASONING_EFFORT=none
 ```
+
+The adapter uses the Responses API (`responses.parse` with a provider-facing
+Structured Outputs schema, image data URLs, `store=False`, zero retries, a
+per-call timeout `AI_ADAPTER_TIMEOUT_SECONDS`, and output caps
+`AI_CLASSIFICATION_MAX_OUTPUT_TOKENS`, `AI_STUDY_NOTE_MAX_OUTPUT_TOKENS`,
+`AI_EVENT_DRAFT_MAX_OUTPUT_TOKENS`). `gpt-4.1-mini` is marked deprecated by
+OpenAI (shutdown listed for Jan 14, 2027); pin a current model for longer use.
+Every AI call passes the consent-dispatch boundary (tasks.md 7.1): consent must
+be granted for the configured provider at the moment of sending, and a result
+is saved only if consent did not change while the request was out.
+
+Consent is bound to the disclosure the user saw (`GET /api/ai/disclosure`):
+a grant made under another provider's or an older disclosure never authorizes a
+request. Provider SDK and HTTP log records in this process are redacted (no
+request bodies, image data, keys or tracebacks), even at DEBUG.
+
+Live smoke test (two small requests on a generated image; costs a little):
+`RUN_LIVE_VISION_SMOKE=1 AI_PROVIDER=openai .venv/bin/python -m pytest -q tests/test_openai_vision_adapter.py -k live -s`
 
 Keep keys only in local/deployment environment configuration—never source,
 browser code, logs, or committed `.env` files. Obtain informed consent for each
 selected screenshot before real processing. `store=False` does not mean zero
 provider retention; review the provider's current data controls before a live
-deployment. The live smoke test is opt-in and was not run here.
+deployment. The live smoke test is opt-in; it has not been run against the
+live API in this repository (no key was available).
 
 ## Built with Kiro — Kiroween workflow
 

@@ -28,6 +28,7 @@ from app.services.study_note_artifact_service import (
     StudyNoteArtifactUnavailableError,
     StudyNoteEditValidationError,
 )
+from tests.consent_helpers import grant_body
 
 TRUSTED = config.TRUSTED_ORIGINS[0]
 HDRS = {"Origin": TRUSTED, "X-Requested-With": "fetch"}
@@ -76,7 +77,7 @@ def _make_note(client: TestClient, count: int = 2) -> tuple[int, list[int]]:
         sid = response.json()["results"][0]["screenshotId"]
         ids.append(sid)
         assert client.post(
-            f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True}
+            f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body()
         ).status_code == 200
     generated = client.post("/api/study-notes", headers=HDRS, json={"screenshotIds": ids})
     assert generated.status_code == 202

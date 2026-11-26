@@ -193,6 +193,54 @@ class ConsentRecord(Base):
     granted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Batch 6A (tasks.md 7.1): incremented on EVERY grant or withdrawal. An AI
+    # dispatch records the version it was authorized against; a result is saved
+    # only if the consent is still granted at that same version.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Batch 6A: the AI provider this consent was given for (the user was shown
+    # that provider's disclosure). A grant for the Fake AI ("nothing is sent")
+    # never authorizes sending to a real provider. NULL = recorded before 6A.
+    provider: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Batch 6A (P1-A): the revision of the disclosure the user was shown when
+    # granting (app/ai/disclosure.py). A changed disclosure needs a fresh grant.
+    disclosure_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class AIDispatch(Base):
+    """One authorized hand-off of ONE screenshot's original bytes to the AI adapter.
+
+    Batch 6A (tasks.md 7.1, design D). A row is written, under the workspace
+    write lock and in the same short transaction that re-reads consent, BEFORE
+    the adapter is called; consent changes take the same lock, so the two are
+    totally ordered per workspace. From the moment a row commits, the request is
+    treated as possibly sent and cannot be recalled. ``UNIQUE(operation_id,
+    screenshot_id)`` makes a duplicate worker for the same operation unable to
+    dispatch twice.
+
+    ``state``: ``dispatched`` (may have been sent; still running),
+    ``completed`` (its result was saved, consent unchanged), ``discarded`` (the
+    worker finished without saving a result) or ``interrupted`` (stale-pending
+    recovery failed the operation: the request may have been sent, its outcome
+    is unknown and nothing was saved). No state ever claims "not sent".
+    """
+
+    __tablename__ = "ai_dispatch"
+    __table_args__ = (
+        UniqueConstraint("operation_id", "screenshot_id", name="ai_dispatch_operation_screenshot"),
+        Index("ix_ai_dispatch_workspace_id", "workspace_id"),
+        Index("ix_ai_dispatch_screenshot_state", "screenshot_id", "state"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspace.id"), nullable=False)
+    operation_id: Mapped[int] = mapped_column(ForeignKey("operation.id"), nullable=False)
+    screenshot_id: Mapped[int] = mapped_column(ForeignKey("screenshot.id"), nullable=False)
+    consent_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    dispatched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Operation(Base):

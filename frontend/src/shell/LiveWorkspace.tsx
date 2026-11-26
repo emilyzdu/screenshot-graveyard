@@ -24,7 +24,6 @@ import { LiveAssistant } from './LiveAssistant';
 import { LIVE_ACTIONS, epitaphProvenanceLabel, type ActionChoice } from './nextAction';
 import { useValidatedAnalysis } from './useValidatedAnalysis';
 import { createAnalysisAuthority, currentSuggestionRule } from './sharedAnalysis';
-import type { ProviderMode } from '../api/ai';
 import { Button } from '../ui/primitives';
 import { ShotArt } from '../ui/ShotArt';
 import { Drawer } from './DetailDrawer';
@@ -147,7 +146,6 @@ function galleryState(result: ListResult): GalleryState {
 
 function toShot(
   screenshot: Screenshot,
-  mode: ProviderMode | 'unknown' = 'unknown',
   choice?: ActionChoice,
   summary = screenshot.analysis,
   suggestionLabel?: string,
@@ -171,7 +169,7 @@ function toShot(
             category: summary.category,
             epitaph: summary.epitaph,
             uncertain: summary.uncertain,
-            provenance: epitaphProvenanceLabel(summary.epitaphOrigin, mode),
+            provenance: epitaphProvenanceLabel(summary.epitaphOrigin, summary.epitaphProvider ?? null),
           },
           ruleSuggestionLabel: suggestionLabel,
           chosenLabel: choice ? LIVE_ACTIONS[choice.action].label : undefined,
@@ -508,7 +506,7 @@ export default function LiveWorkspace() {
   const shots = screenshots
     .filter((shot) => (shot.state === 'archived') === archived)
     .map((shot) => toShot(
-      shot, provider.mode, choices[shot.screenshotId], cardSummary(shot),
+      shot, choices[shot.screenshotId], cardSummary(shot),
       selected?.screenshotId === shot.screenshotId && suggestion ? LIVE_ACTIONS[suggestion].label : undefined,
     ));
   const titleOf = (id: number) => {
@@ -685,6 +683,7 @@ export default function LiveWorkspace() {
               screenshot={detailRecord}
               providerMode={provider.mode}
               providerLoading={provider.loading}
+              refreshProvider={provider.refresh}
               onAnalysisChanged={() => void refreshGallery()}
               analysisAuthority={analysisAuthority}
             />

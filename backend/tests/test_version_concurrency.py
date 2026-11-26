@@ -60,6 +60,7 @@ from app.services.study_note_artifact_service import (
 from app.services.study_note_service import StudyNoteService
 from app.services.vault_service import VaultService
 from app.storage.file_store import FileStore
+from tests.consent_helpers import grant_body, current_disclosure
 
 JOIN_TIMEOUT = 30
 
@@ -218,7 +219,7 @@ def barrier_at(monkeypatch, cls, name, barrier):
 
 def _grant_all(s, wid, ids):
     for sid in ids:
-        ConsentService(s, wid).record_consent(sid, True)
+        ConsentService(s, wid).record_consent(sid, True, disclosure=current_disclosure())
 
 
 def make_note(env, wid, n=3):
@@ -986,7 +987,7 @@ def _http_note(c, n=2):
     for i in range(n):
         r = c.post("/api/screenshots", headers=HDRS, files=[("files", (f"{i}.png", png((i * 30, 5, 5)), "image/png"))])
         sid = r.json()["results"][0]["screenshotId"]
-        c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+        c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
         ids.append(sid)
     op = c.post("/api/study-notes", headers=HDRS, json={"screenshotIds": ids}).json()["operationId"]
     assert c.get(f"/api/operations/{op}").json()["status"] == "successful"
@@ -1014,7 +1015,7 @@ def test_http_analysis_edit_reports_a_generic_503_and_changes_nothing(http, monk
     c, eng, _ = http
     r = c.post("/api/screenshots", headers=HDRS, files=[("files", ("a.png", png((9, 9, 9)), "image/png"))])
     sid = r.json()["results"][0]["screenshotId"]
-    c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+    c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
     op = c.post(f"/api/screenshots/{sid}/classify", headers=HDRS).json()["operationId"]
     assert c.get(f"/api/operations/{op}").json()["status"] == "successful"
     with Session(eng) as s:

@@ -44,6 +44,8 @@ class FakeAIAdapterMode(str, Enum):
 
 @dataclass(frozen=True)
 class FakeAIAdapter:
+    #: Batch 6A (P2-E): the provider recorded on every version this adapter writes.
+    provider_id = "fake"
     """A deterministic, network-free adapter implementation for tests.
 
     The method annotations match :class:`app.ai.adapter.AIAdapter`. ``INVALID``
