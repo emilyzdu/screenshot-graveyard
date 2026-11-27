@@ -9,8 +9,18 @@ import LiveWorkspace from './shell/LiveWorkspace';
 // fixtures and never touches the API client. Enable with `?demo=1` or by
 // building/running with VITE_UI_MODE=demo (`npm run dev:demo`).
 const DemoApp = lazy(() => import('./demo/DemoApp'));
+// The Lantern Graveyard (Pixel World) loads on demand: `?view=world`. With
+// `?demo=1` it uses synthetic ghosts instead of the API.
+const PixelWorld = lazy(() => import('./world/PixelWorld'));
 
 function App() {
+  if (new URLSearchParams(window.location.search).get('view') === 'world') {
+    return (
+      <Suspense fallback={null}>
+        <PixelWorld />
+      </Suspense>
+    );
+  }
   if (isDemoMode()) {
     return (
       <Suspense fallback={null}>

@@ -1,0 +1,364 @@
+{
+  "palette": {
+    "n0": "#120c24",
+    "n1": "#1b1433",
+    "n2": "#2a1f4d",
+    "n3": "#3c3466",
+    "s0": "#4e4775",
+    "s1": "#6e6890",
+    "s2": "#9a93b8",
+    "s3": "#c9c3e0",
+    "w0": "#6c4ab0",
+    "w1": "#a77be0",
+    "w2": "#d8b8ff",
+    "w3": "#f6a6c8",
+    "moon": "#f3ecff",
+    "candle": "#ffe4a3",
+    "lamp": "#ffc764",
+    "lantern": "#f59b3c",
+    "p0": "#b04fe0",
+    "p1": "#e08cff",
+    "water": "#8fd3ff",
+    "g0": "#2f4a3e",
+    "g1": "#4d7a5c",
+    "g2": "#7fae7a",
+    "ok": "#62d394",
+    "warn": "#f5b73d"
+  },
+  "grid": 16,
+  "logicalSize": [
+    640,
+    360
+  ],
+  "assets": [
+    {
+      "id": "bg-sky",
+      "file": "bg-sky.png",
+      "width": 640,
+      "height": 360,
+      "frames": 1,
+      "role": "background",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "moon",
+      "file": "moon.png",
+      "width": 96,
+      "height": 96,
+      "frames": 1,
+      "role": "background",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "bg-far",
+      "file": "bg-far.png",
+      "width": 640,
+      "height": 190,
+      "frames": 1,
+      "role": "background",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "ground",
+      "file": "ground.png",
+      "width": 640,
+      "height": 360,
+      "frames": 1,
+      "role": "background",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "building-tower",
+      "file": "building-tower.png",
+      "width": 64,
+      "height": 112,
+      "frames": 1,
+      "role": "location:tower",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "building-library",
+      "file": "building-library.png",
+      "width": 112,
+      "height": 88,
+      "frames": 1,
+      "role": "location:library",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "building-altar",
+      "file": "building-altar.png",
+      "width": 56,
+      "height": 44,
+      "frames": 1,
+      "role": "location:altar",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "building-well",
+      "file": "building-well.png",
+      "width": 56,
+      "height": 56,
+      "frames": 1,
+      "role": "location:well",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "building-crypt",
+      "file": "building-crypt.png",
+      "width": 88,
+      "height": 72,
+      "frames": 1,
+      "role": "location:crypt",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "building-portal",
+      "file": "building-portal.png",
+      "width": 72,
+      "height": 88,
+      "frames": 1,
+      "role": "location:portal",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "prop-tree-a",
+      "file": "prop-tree-a.png",
+      "width": 72,
+      "height": 100,
+      "frames": 1,
+      "role": "prop",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "prop-tree-b",
+      "file": "prop-tree-b.png",
+      "width": 72,
+      "height": 100,
+      "frames": 1,
+      "role": "prop",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "prop-grave-0",
+      "file": "prop-grave-0.png",
+      "width": 20,
+      "height": 24,
+      "frames": 1,
+      "role": "prop",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "prop-grave-1",
+      "file": "prop-grave-1.png",
+      "width": 20,
+      "height": 24,
+      "frames": 1,
+      "role": "prop",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "prop-grave-2",
+      "file": "prop-grave-2.png",
+      "width": 20,
+      "height": 24,
+      "frames": 1,
+      "role": "prop",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "prop-lamp",
+      "file": "prop-lamp.png",
+      "width": 16,
+      "height": 48,
+      "frames": 1,
+      "role": "prop",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "prop-signpost",
+      "file": "prop-signpost.png",
+      "width": 32,
+      "height": 44,
+      "frames": 1,
+      "role": "prop",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "prop-pond-cat",
+      "file": "prop-pond-cat.png",
+      "width": 80,
+      "height": 44,
+      "frames": 1,
+      "role": "prop",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "foreground",
+      "file": "foreground.png",
+      "width": 640,
+      "height": 360,
+      "frames": 1,
+      "role": "foreground",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "wisteria-canopy",
+      "file": "wisteria-canopy.png",
+      "width": 200,
+      "height": 90,
+      "frames": 1,
+      "role": "foreground",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "glow-lumi",
+      "file": "glow-lumi.png",
+      "width": 128,
+      "height": 128,
+      "frames": 1,
+      "role": "glow",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "glow-lamp",
+      "file": "glow-lamp.png",
+      "width": 72,
+      "height": 72,
+      "frames": 1,
+      "role": "glow",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "glow-portal",
+      "file": "glow-portal.png",
+      "width": 120,
+      "height": 120,
+      "frames": 1,
+      "role": "glow",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "ghost-sheet",
+      "file": "ghost-sheet.png",
+      "width": 240,
+      "height": 112,
+      "frames": 40,
+      "frameSize": [
+        24,
+        28
+      ],
+      "role": "actor",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "lumi-sheet",
+      "file": "lumi-sheet.png",
+      "width": 112,
+      "height": 68,
+      "frames": 8,
+      "frameSize": [
+        28,
+        34
+      ],
+      "role": "actor",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "selection-brackets",
+      "file": "selection-brackets.png",
+      "width": 32,
+      "height": 36,
+      "frames": 1,
+      "role": "hud",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "lumi-portrait",
+      "file": "lumi-portrait.png",
+      "width": 32,
+      "height": 32,
+      "frames": 1,
+      "role": "hud",
+      "source": "procedural (scripts/generate-world-assets.mjs)",
+      "license": "original, generated in this repository",
+      "production_ready": false
+    },
+    {
+      "id": "reference-m-world",
+      "file": "../../../../docs/design/pixel-world/m-world.png",
+      "role": "reference-only",
+      "source": "approved mockup, not used as a game asset",
+      "license": "project reference",
+      "production_ready": false
+    },
+    {
+      "id": "reference-m-card",
+      "file": "../../../../docs/design/pixel-world/m-card.png",
+      "role": "reference-only",
+      "source": "approved mockup, not used as a game asset",
+      "license": "project reference",
+      "production_ready": false
+    },
+    {
+      "id": "reference-m-approve",
+      "file": "../../../../docs/design/pixel-world/m-approve.png",
+      "role": "reference-only",
+      "source": "approved mockup, not used as a game asset",
+      "license": "project reference",
+      "production_ready": false
+    }
+  ]
+}
