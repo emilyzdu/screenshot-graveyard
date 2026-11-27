@@ -196,7 +196,7 @@ Routers validate request shape (Pydantic request models), call a service with th
 - **`Artifact_Service`** (INV-1, INV-5, INV-6, INV-7): version history, current-version pointer, redo, edit, compare, source references.
 - **`Consent_Service`**: records/reads per-screenshot consent; gates all AI paths.
 - **`AI_Adapter`** (INV-4, Req 13): the `AIAdapter` Protocol + real + fake implementations.
-- **`Delivery_Service`** — **P1 INTERFACE STUB ONLY** (INV-8, INV-9): method signatures and the external-write safety contract are defined, but there is **no implementation, no OAuth, no third-party infrastructure in P0** (Req 8 note, Req 16.3, Req 14.7).
+- **`Delivery_Service`** — **P1 INTERFACE STUB ONLY** (INV-8, INV-9): method signatures and the external-write safety contract are defined, but there is **no implementation, no OAuth, no third-party infrastructure in P0** (Req 8 note, Req 16.3, Req 14.7). *AMD-1:* its destinations are Google Calendar (primary) and Notion (conditional) per Requirement 25; the delivery design (account binding, receipts, idempotency key per artifact, version and destination) is specified in `docs/pixel-world-technical-design.md` §13 and remains unimplemented.
 
 ### `AIAdapter` Protocol and the fake adapter (Req 13)
 

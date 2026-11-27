@@ -23,7 +23,7 @@ Layers:
 | Recent Activity | `DEMO_ACTIVITY` | Operation polling (`getOperation`, `ai/useOperationPolling.ts`) |
 | Safe Burial / Resurrection, The Crypt | Local state | `archiveScreenshot`, `restoreScreenshot` |
 | Creations | `DEMO_CREATIONS` | `listStudyNotes`, `getStudyNote` |
-| Connections | Static "Not connected" / "Coming later" | None yet (OneNote/Calendar OAuth out of scope) |
+| Connections | Static "Not connected" / "Coming later" | None yet. Google Calendar (primary) and Notion (conditional) delivery are specified by Requirement 25 (AMD-1) and not implemented |
 | Header "Demo AI mode" | Constant | `getProviderMode`, `HealthStatus` |
 
 ## Remaining integration tasks
@@ -154,7 +154,7 @@ Worker (`services/event_draft_service.py`): pending + kind check → consent →
 
 Frontend: `shell/CalendarDraft.tsx` beside `MakeNotesDraft.tsx` in the Live Quiet Assistant; both use the shared `shell/usePreparation.ts` state machine (extracted unchanged from 4A: lookup on mount, polling, busy guard, lost-response reconciliation, and the invocation-time check that the panel is mounted, its action is the current choice and the provider is Fake). Prepare is enabled only while Add to Calendar is chosen; Retry only while it is still chosen. The draft view shows each field exactly as saved, or an explicit "Missing" / "Not set" marker and an "Uncertain" badge; times are never converted or reformatted. Labels: "Draft ready", "Needs details", "Simulated draft · Fake AI", "Not added to Google Calendar or any other calendar".
 
-Open conflict for any later calendar delivery: see "Open conflict: external destination" in `.kiro/specs/screenshot-graveyard/prd-v2-additions.md` (Requirement 17.3 / 17.6 and ASSUMPTION A6 name OneNote / Google Docs as the single external destination).
+Resolved by amendment AMD-1: Google Calendar is the primary delivery destination (Notion conditional); see Requirement 25 in `.kiro/specs/screenshot-graveyard/prd-v2-additions.md`. Historical note: this was previously an open conflict with (Requirement 17.3 / 17.6 and ASSUMPTION A6 name OneNote / Google Docs as the single external destination).
 
 ### Batch 4B remediation
 

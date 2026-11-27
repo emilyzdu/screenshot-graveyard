@@ -22,13 +22,16 @@ INV-1 to INV-10 apply unchanged (see `.kiro/steering/safety.md`). In addition:
 - Accepting a suggestion only invokes existing endpoints.
 - Dismissing or hiding a suggestion never modifies a screenshot, artifact or
   version.
-- No delete path is added. No external write is added.
+- No delete path is added. Requirements 18–24 add no external write; Requirement 25
+  (AMD-1) defines the only external writes, each requiring explicit user action.
 - The UI reflects server-confirmed results only.
 
 ## Out of scope for these additions
 
-Real OneNote or Calendar auth, external app writes, autonomous deletion, live
-OpenAI calls, long-term memory, external undo, and everything on the P2 list.
+For Requirements 18–24: OneNote or Calendar auth, external app writes,
+autonomous deletion, live OpenAI calls, long-term memory, external undo, and
+everything on the P2 list. External delivery is specified separately by
+Requirement 25 (AMD-1); external undo remains out of scope.
 
 ## Additional requirements
 
@@ -204,14 +207,69 @@ nothing is sent without my consent.
    data. Missing or invalid real-provider configuration SHALL fail closed,
    never fall back to the Fake AI. No external delivery is added.
 
-### Open conflict: external destination for a future calendar delivery
-Requirement 21 adds no external write. A later Google Calendar delivery
-(planned as "Batch 6") would conflict with existing requirements that are NOT
-changed here: ASSUMPTION A6 and Requirement 17.3 (the single P1 external
-destination is OneNote, Google Docs as fallback) and Requirement 17.6 (no
-multiple external integrations). Before any calendar delivery is built, the
-product owner must either replace the approved destination or record an
-explicit exception, and the Delivery_Service rules (INV-8, INV-9) apply.
+### Requirement 25: External delivery of approved drafts (P1, AMD-1)
+
+**Amendment AMD-1 (2026-11-27, product owner decision).** Resolves the conflict
+previously recorded here ("Open conflict: external destination for a future
+calendar delivery"): ASSUMPTION A6 and Requirements 16.3 and 17.6 named OneNote
+(Google Docs fallback) as the single destination; they now point here. Delivery
+is a separate workstream from AI preparation (`docs/pixel-world-prd.md` §B-15
+and §M Phase D). Nothing in this requirement is implemented yet.
+
+**User Story:** As a solo user, I want to send a draft I approved to my own
+Google Calendar (and later my Notion), so that a screenshot becomes a real event
+or page, while nothing leaves the app unless I explicitly send it and the app
+never claims success it cannot prove.
+
+1. **Destinations.** THE System SHALL support at most these destinations:
+   (a) Google Calendar, for calendar event drafts (primary); (b) Notion, for
+   notes drafts, only after 25.1(a) passes its acceptance criteria and Notion
+   OAuth, account binding and deployment are confirmed feasible. No other
+   destination SHALL be offered, and no destination SHALL be shown as available
+   before its implementation passes acceptance.
+2. **Preparation is not delivery.** AI preparation (Requirements 21 and 24, and
+   the Batch 6B automation) SHALL only create drafts inside the workspace. No AI
+   result, routing decision, automation setting or approval SHALL by itself
+   cause an External Write.
+3. **Explicit approval for every write.** THE Delivery_Service SHALL perform an
+   External Write only (a) for a draft version that has an approval record in
+   the approval ledger (Requirement 23) whose content SHA-256 still matches the
+   version, and (b) when the user explicitly requests delivery of that exact
+   version to that destination. A later edit creates an unapproved version that
+   cannot be delivered until it is approved. There SHALL be no automatic or
+   batch delivery.
+4. **Account binding.** Connecting a destination SHALL use the provider's OAuth
+   authorization-code flow with PKCE and a single-use `state` bound to the
+   requesting workspace, an HTTPS redirect URI on an allowlist, and the
+   narrowest scope that permits the write (for Google Calendar, event creation
+   only). Tokens SHALL be stored server-side only, encrypted at rest, bound to
+   one workspace and one destination, never sent to the client and never
+   logged. The user SHALL be able to disconnect, which deletes the stored tokens
+   and, where supported, revokes them at the provider. A binding SHALL never be
+   usable from another workspace (404 non-disclosure, as elsewhere).
+5. **Idempotency (INV-9).** Each delivery SHALL carry a durable idempotency key
+   derived from (artifact, version, destination). A repeated or concurrent
+   request with the same key SHALL reuse the existing delivery. After an
+   uncertain outcome, a retry SHALL first reconcile, using a
+   destination-supported deduplication mechanism (for Google Calendar, a
+   client-supplied event id derived from the key) or a verified lookup, and
+   SHALL NOT create a second external item.
+6. **Evidence and receipts (INV-8).** A delivery SHALL be reported successful
+   only with verified evidence returned by the destination (the external item
+   id and, where available, its link), stored as a delivery receipt with the
+   destination, version, time and external id. Without a receipt the delivery
+   is failed or uncertain, never "Delivered".
+7. **Truthful states.** THE System SHALL expose, per destination and per draft
+   version, only these states: not connected (capability off), connection
+   required, ready for delivery, delivering, delivered (with a receipt), failed,
+   or uncertain. The UI SHALL NOT show a state the server has not reported.
+8. **Failure safety (INV-4).** A failed, uncertain or disconnected delivery
+   SHALL NOT change the draft, its versions, its approval record or the
+   original screenshot.
+9. **Tests (Requirement 14.6).** WHERE delivery is enabled, tests SHALL cover
+   25.3–25.8 against a fake destination, and at least one manual live delivery
+   to a test account SHALL be recorded before a destination is marked
+   available.
 
 ## Additional tasks
 

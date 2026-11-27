@@ -475,10 +475,10 @@ The properties are grouped into these reusable modules:
   - **Acceptance test / expected output:** tests assert each animation maps to a real state and is disabled/minimized under reduced-motion.
   - **Priority:** P1
 
-- [ ] 4.9 `[P1 — optional, non-blocking]` Single external integration (OneNote preferred; Google Docs fallback)
-  - Implement one genuine external destination via `Delivery_Service`, honoring INV-8/INV-9 (verified evidence before success; no blind duplicate on uncertain retry). Enables PBT-DELIVERY. No P0 task depends on this.
+- [ ] 4.9 `[P1 — optional, non-blocking]` External delivery of approved drafts: Google Calendar (primary); Notion (conditional) (amended by AMD-1; formerly "Single external integration (OneNote preferred; Google Docs fallback)")
+  - Implement Requirement 25 (`prd-v2-additions.md`) via `Delivery_Service`, honoring INV-8/INV-9 (verified evidence and a stored receipt before success; idempotency key per artifact, version and destination; reconcile before any retry). Google Calendar first; Notion only under the conditions in 25.1(b). OAuth account binding per 25.4. Explicit Send of an approved version only (25.3). Planned as Pixel World PRD Phase D. Enables PBT-DELIVERY. No P0 task depends on this.
   - **Dependencies:** 2.8, 4.1
-  - **Requirements:** 16.3, 8.4, 8.5, 14.6, 14.7, INV-8, INV-9, P27, P28
+  - **Requirements:** 16.3, 25, 8.4, 8.5, 14.6, 14.7, INV-8, INV-9, P27, P28
   - **Acceptance test / expected output:** with the integration enabled, tests assert a write is reported successful only with verified evidence and an uncertain retry does not create a duplicate external artifact.
   - **Priority:** P1
 

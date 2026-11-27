@@ -32,7 +32,7 @@ The following ambiguities were identified in the source vision. Each is resolved
 - **ASSUMPTION A3 (Duplicate handling):** "Handle duplicates reasonably" is resolved as: duplicates are detected by SHA-256 checksum, stored once as bytes, and surfaced to the user as distinct upload records that reference the shared content, rather than silently rejected. Duplicate detection and shared-content storage are scoped within a single workspace (see ASSUMPTION A1).
 - **ASSUMPTION A4 (Study-note screenshot count):** "~4–8 related study screenshots" is treated as a soft guideline. The system accepts 1 to 12 screenshots for a study note and warns (does not block) outside the 4–8 range.
 - **ASSUMPTION A5 (Supported formats):** Supported upload formats are PNG, JPEG, and WebP. The maximum accepted file size is 15 MB per file. These are concrete, testable defaults and may be tuned in design.
-- **ASSUMPTION A6 (External destination for P1):** The single genuine external integration, if attempted, is OneNote; Google Docs is the fallback. The external integration is P1, not P0: no OAuth flow and no third-party destination availability are required for P0 to be complete. Markdown export is mandatory regardless and does not depend on any external integration.
+- **ASSUMPTION A6 (External destinations, amended by AMD-1, 2026-11-27):** External delivery targets exactly two destinations, defined in Requirement 25 (`prd-v2-additions.md`): **Google Calendar** (primary; delivers an approved calendar event draft) and **Notion** (secondary and conditional; delivers an approved notes draft only after Google Calendar delivery passes its acceptance criteria and Notion OAuth, account binding and deployment are feasible). External delivery remains outside P0: no OAuth flow and no third-party availability are required for P0 to be complete, and Markdown export stays mandatory regardless. *History: the original assumption named OneNote as the single P1 destination with Google Docs as fallback; that is superseded and no longer an active requirement.*
 
 ## Glossary
 
@@ -44,7 +44,7 @@ The following ambiguities were identified in the source vision. Each is resolved
 - **Classification_Service**: The backend component that invokes the AI_Adapter to classify a screenshot and produce its Epitaph in a single AI call.
 - **Study_Note_Service**: The backend component that generates structured study notes from a user-selected set of screenshots.
 - **Artifact_Service**: The backend component that records source-to-artifact relationships, maintains artifact version history, and manages redo/regeneration.
-- **Delivery_Service**: The backend component that performs external writes (e.g., OneNote/Google Docs) and verifies delivery evidence. (P1)
+- **Delivery_Service**: The backend component that performs external writes to the destinations in Requirement 25 (Google Calendar; Notion, conditional) and verifies delivery evidence. (P1; amended by AMD-1)
 - **Screenshot**: An uploaded image record with a stable Screenshot ID, immutable original bytes, a SHA-256 checksum, and metadata.
 - **Screenshot ID**: A stable, unique identifier assigned to a screenshot at upload that never changes for the life of the record.
 - **Artifact**: A generated output (Epitaph, Study_Note, or external-delivery record) that references one or more source screenshots and carries a version history.
@@ -60,7 +60,7 @@ The following ambiguities were identified in the source vision. Each is resolved
 - **Resurrection**: UI metaphor for restoring an archived original or redoing a transformation to produce a new version.
 - **Safe Burial**: UI metaphor for archiving a screenshot. Archiving never permanently deletes the original and never affects the user's device.
 - **Reduced-motion**: An accessibility mode that disables or minimizes animation, honoring the user's operating-system or in-app preference.
-- **External Write**: A write of generated content to a third-party destination outside the System (e.g., OneNote, Google Docs). (P1)
+- **External Write**: A write of an approved draft version to a third-party destination outside the System (Google Calendar; Notion, conditional; see Requirement 25). It is distinct from preparing a draft: AI preparation writes only inside the workspace, and only an explicit user Send performs an External Write. (P1; amended by AMD-1)
 
 ---
 
@@ -286,15 +286,15 @@ The following ambiguities were identified in the source vision. Each is resolved
 
 ### Requirement 16: P1 Optional Enhancements (P1 — only after P0 is stable)
 
-**User Story:** As a solo user, I want optional conveniences (wishlist cards, a memories gallery, one genuine external destination, a quick review ritual, and subtle themed animations) once the core is stable, so that the product feels richer without risking P0.
+**User Story:** As a solo user, I want optional conveniences (wishlist cards, a memories gallery, delivery of approved drafts to an external app, a quick review ritual, and subtle themed animations) once the core is stable, so that the product feels richer without risking P0.
 
-**Note:** Every criterion below is conditional on the corresponding P1 feature being enabled. The OneNote/Google Docs external integration is P1 and is not required for P0 completion; P0 MUST NOT depend on OAuth or third-party destination availability. Markdown export (Requirement 6.11) remains mandatory regardless of whether any P1 external integration is delivered. No external-delivery infrastructure should be built before the integration is enabled.
+**Note:** Every criterion below is conditional on the corresponding P1 feature being enabled. External delivery (Google Calendar; Notion, conditional; Requirement 25) is P1 and is not required for P0 completion; P0 MUST NOT depend on OAuth or third-party destination availability. Markdown export (Requirement 6.11) remains mandatory regardless of whether any P1 external integration is delivered. No external-delivery infrastructure should be built before the integration is enabled.
 
 #### Acceptance Criteria
 
 1. WHERE the shopping wishlist feature is enabled, THE System SHALL allow the user to create simple wishlist cards from Shopping/Inspiration screenshots.
 2. WHERE the memories gallery feature is enabled, THE System SHALL present Memory/Entertainment screenshots in a gallery view.
-3. WHERE a single external destination integration is enabled, THE Delivery_Service SHALL deliver a study note to one genuine external destination (OneNote preferred; Google Docs fallback) subject to the external-write safety criteria in Requirement 8. (INV-8, INV-9; see ASSUMPTION A6.)
+3. WHERE external delivery is enabled, THE Delivery_Service SHALL deliver approved drafts only as specified in Requirement 25 (Google Calendar for calendar event drafts; Notion, conditionally, for notes drafts), subject to the external-write safety criteria in Requirement 8. (INV-8, INV-9; see ASSUMPTION A6. Amended by AMD-1; the earlier "one destination, OneNote preferred, Google Docs fallback" criterion is superseded.)
 4. WHERE the Quick Ritual feature is enabled, THE System SHALL offer a time-boxed review (2-minute, 10-minute, or all-items) presenting Revive, Let Rest, and Later actions.
 5. WHERE the Quick Ritual feature is enabled, THE System SHALL persist review actions and SHALL allow the user to undo a review action.
 6. WHERE subtle Halloween animations are enabled, THE System SHALL connect each animation to a real workflow state and SHALL honor the reduced-motion preference. (See Requirement 11.3.)
@@ -308,14 +308,14 @@ The following ambiguities were identified in the source vision. Each is resolved
 #### Acceptance Criteria
 
 1. THE System SHALL NOT provide automatic screenshot clustering.
-2. THE System SHALL NOT provide advanced reminders or scheduling.
+2. THE System SHALL NOT provide advanced reminders or scheduling. (Clarified by AMD-1: delivering one approved event to the user's Google Calendar under Requirement 25 is not reminders or scheduling; the System SHALL NOT add reminder rules, recurrence or scheduling logic of its own.)
 3. THE System SHALL NOT provide price tracking.
 4. THE System SHALL NOT provide persistent personalization based on user corrections.
 5. THE System SHALL NOT provide screenshot-region annotation.
-6. THE System SHALL NOT provide multiple external integrations (only one genuine destination is considered, and only as P1).
+6. THE System SHALL NOT provide external integrations beyond the two destinations in Requirement 25 (Google Calendar; Notion, conditional), and SHALL NOT provide any external write except an explicitly approved delivery under Requirement 25. (Amended by AMD-1; the earlier "single destination only" wording is superseded.)
 7. THE System SHALL NOT provide phone photo-library background syncing.
 8. THE System SHALL NOT permanently delete device images (and SHALL NOT permanently delete stored originals; see ASSUMPTION A2).
-9. THE System SHALL NOT provide a password vault or plaintext credential repository.
+9. THE System SHALL NOT provide a password vault or plaintext credential repository. (Clarified by AMD-1: OAuth tokens for Requirement 25 are stored server-side only, encrypted at rest, scoped to one workspace and one destination; they are never user passwords and never shown to the client.)
 10. THE System SHALL NOT provide automated purchases.
 11. THE System SHALL NOT provide a large autonomous-agent framework.
 12. THE System SHALL NOT provide a full multi-user authentication system with accounts and login (per-visitor Workspace isolation is used instead; see ASSUMPTION A1).
@@ -335,6 +335,6 @@ Each mandatory engineering invariant maps to at least one acceptance criterion a
 | INV-5 | Redo creates a new artifact version | 6.9, 6.10, 7.3, 7.4, 7.6, 14.3 |
 | INV-6 | Previous artifact versions remain available | 6.9, 6.10, 7.5, 7.6, 8.6, 12.4, 14.3 |
 | INV-7 | Generated outputs retain references to sources | 6.7, 7.2, 12.3, 14.4 |
-| INV-8 | External writes never reported successful without evidence (exercised/verified only when the P1 external integration is enabled) | 8.4, 14.6, 16.3 |
-| INV-9 | Uncertain retries never blindly duplicate external artifacts (exercised/verified only when the P1 external integration is enabled) | 8.5, 14.6, 16.3 |
+| INV-8 | External writes never reported successful without evidence (exercised/verified only when the P1 external integration is enabled) | 8.4, 14.6, 16.3, 25 |
+| INV-9 | Uncertain retries never blindly duplicate external artifacts (exercised/verified only when the P1 external integration is enabled) | 8.5, 14.6, 16.3, 25 |
 | INV-10 | Archive/review actions never permanently delete originals | 2.6, 3.1, 3.5, 10.5 |

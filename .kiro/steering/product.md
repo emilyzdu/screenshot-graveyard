@@ -58,8 +58,10 @@ an isolated anonymous Workspace.
 
 ### P1 — optional, only after P0 is stable (do not let these block P0)
 
-Shopping wishlist cards; memories gallery; one genuine external destination
-(OneNote preferred, Google Docs fallback); Quick Ritual review; persistent,
+Shopping wishlist cards; memories gallery; external delivery of approved drafts
+(Google Calendar primary, Notion conditional; Requirement 25, amendment AMD-1;
+every external write needs an explicit user Send of an approved version); Quick
+Ritual review; persistent,
 undoable review actions; subtle themed animations tied to real state. Markdown
 export remains mandatory regardless of any external integration.
 
@@ -67,7 +69,8 @@ export remains mandatory regardless of any external integration.
 
 Automatic screenshot clustering; advanced reminders/scheduling; price tracking;
 persistent personalization from corrections; screenshot-region annotation;
-multiple external integrations; phone photo-library background syncing;
+external destinations beyond Google Calendar and Notion; phone photo-library
+background syncing;
 permanent deletion of originals or device images; a password/credential vault;
 automated purchases; a large autonomous-agent framework; full multi-user
 account authentication (per-visitor Workspace isolation is used instead).
