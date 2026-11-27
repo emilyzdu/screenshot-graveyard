@@ -797,3 +797,102 @@ export function approveVersion(artifactId: number, versionId: number, acknowledg
     f,
   );
 }
+
+// ---------------------------------------------------------------- Batch 6B: auto-processing
+
+/** The workspace's opt-in automation preference. It is not consent. */
+export function getAutomation(f: Fetch = fetch) {
+  return call('/api/workspace/automation', {}, (b) => (isObj(b) && typeof b.autoPrepare === 'boolean' ? b.autoPrepare : null), f);
+}
+/** Turn automatic analysis -> routing -> draft preparation on or off. CSRF-guarded POST. */
+export function setAutomation(enabled: boolean, f: Fetch = fetch) {
+  return call(
+    '/api/workspace/automation',
+    { method: 'POST', json: { autoPrepare: enabled } },
+    (b) => (isObj(b) && b.autoPrepare === enabled ? enabled : null),
+    f,
+  );
+}
+
+export const AUTO_STAGES = [
+  'archived', 'awaiting_consent', 'not_started', 'analyzing', 'analysis_failed', 'routing',
+  'ready_to_prepare', 'preparing', 'ready_for_review', 'preparation_failed', 'needs_choice',
+  'recommended', 'reference',
+] as const;
+export type AutoStage = (typeof AUTO_STAGES)[number];
+export type RouteDecision = 'auto' | 'recommend' | 'keep_reference' | 'needs_choice';
+export interface AutoRoute {
+  decision: RouteDecision;
+  action: SuggestedAction | null;
+  reasonCode: string;
+  reason: string;
+}
+export interface AutoStep {
+  operationId: number;
+  status: OperationStatus;
+  artifactId: number | null;
+  errorDetail: string | null;
+  provider: string | null;
+  action?: SuggestedAction;
+  /** Who started it, from the server's durable record. null = not recorded (shown neutrally). */
+  trigger: 'auto' | 'manual' | null;
+}
+export interface AutoProcessState {
+  screenshotId: number;
+  autoPrepare: boolean;
+  consent: boolean;
+  stage: AutoStage;
+  route: AutoRoute | null;
+  analysis: AutoStep | null;
+  preparation: AutoStep | null;
+  running: boolean;
+}
+/** In-progress stages: the server is (or may be) doing work right now. */
+export const AUTO_IN_PROGRESS: ReadonlySet<AutoStage> = new Set<AutoStage>(['analyzing', 'routing', 'preparing']);
+
+function parseAutoStep(b: unknown, withAction: boolean): AutoStep | null | undefined {
+  if (b === null) return null;
+  if (!isObj(b) || typeof b.operationId !== 'number' || typeof b.status !== 'string' || !STATUSES.includes(b.status)) return undefined;
+  if (b.artifactId !== null && typeof b.artifactId !== 'number') return undefined;
+  const step: AutoStep = {
+    operationId: b.operationId,
+    status: b.status as OperationStatus,
+    artifactId: b.artifactId as number | null,
+    errorDetail: typeof b.errorDetail === 'string' ? b.errorDetail : null,
+    provider: typeof b.provider === 'string' ? b.provider : null,
+    trigger: b.trigger === 'auto' || b.trigger === 'manual' ? b.trigger : null,
+  };
+  if (withAction) {
+    if (b.action !== 'make_notes' && b.action !== 'add_calendar') return undefined;
+    step.action = b.action;
+  }
+  return step;
+}
+function parseAutoState(b: unknown, screenshotId: number): AutoProcessState | null {
+  if (!isObj(b) || b.screenshotId !== screenshotId) return null;
+  if (typeof b.autoPrepare !== 'boolean' || typeof b.consent !== 'boolean' || typeof b.running !== 'boolean') return null;
+  if (typeof b.stage !== 'string' || !(AUTO_STAGES as readonly string[]).includes(b.stage)) return null;
+  let route: AutoRoute | null = null;
+  if (b.route !== null) {
+    const r = b.route;
+    if (!isObj(r) || typeof r.reason !== 'string' || typeof r.reasonCode !== 'string') return null;
+    if (r.decision !== 'auto' && r.decision !== 'recommend' && r.decision !== 'keep_reference' && r.decision !== 'needs_choice') return null;
+    if (r.action !== null && r.action !== 'make_notes' && r.action !== 'add_calendar') return null;
+    route = { decision: r.decision, action: r.action, reasonCode: r.reasonCode, reason: r.reason };
+  }
+  const analysis = parseAutoStep(b.analysis, false);
+  const preparation = parseAutoStep(b.preparation, true);
+  if (analysis === undefined || preparation === undefined) return null;
+  return { screenshotId, autoPrepare: b.autoPrepare, consent: b.consent, stage: b.stage as AutoStage, route, analysis, preparation, running: b.running };
+}
+/** The derived pipeline state for one screenshot. A safe read: it never starts anything. */
+export function getAutoProcess(screenshotId: number, f: Fetch = fetch) {
+  return call(`/api/screenshots/${screenshotId}/auto-process`, {}, (b) => parseAutoState(b, screenshotId), f);
+}
+/**
+ * Explicitly continue automatically for one screenshot (202 = work scheduled,
+ * 200 = nothing new needed). Idempotent on the server. CSRF-guarded POST.
+ */
+export function startAutoProcess(screenshotId: number, f: Fetch = fetch) {
+  return call(`/api/screenshots/${screenshotId}/auto-process`, { method: 'POST' }, (b) => parseAutoState(b, screenshotId), f);
+}

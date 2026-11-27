@@ -80,15 +80,31 @@ def key_prefix(screenshot_id: int, action: str) -> str:
     return f"prepare:{action}:screenshot:{screenshot_id}:"
 
 
-def idempotency_key(screenshot_id: int, action: str, provider: str) -> str:
+AUTO_SEGMENT = "auto:"
+
+
+def idempotency_key(screenshot_id: int, action: str, provider: str, *, auto: bool = False) -> str:
     """The durable identity of one preparation request, provider included.
+
+    Batch 6B: a preparation started by automatic processing carries an
+    ``auto:`` segment before the provider. It shares the per-(screenshot,
+    action) prefix, so manual and automatic requests still reuse one draft, and
+    it is the durable record of who triggered it (``trigger_from_key``).
 
     The provider is part of the identity (a simulated draft is not the same
     request as a real-AI one) and is how a reloaded page learns, from the
     server, whether a draft is simulated, regardless of the provider mode at
     viewing time.
     """
-    return f"{key_prefix(screenshot_id, action)}provider:{provider}"
+    return f"{key_prefix(screenshot_id, action)}{AUTO_SEGMENT if auto else ''}provider:{provider}"
+
+
+def trigger_from_key(key: str | None) -> str | None:
+    """'auto' only when the key says so; 'manual' for every other keyed request
+    (before Batch 6B only a person could start one); None without a key."""
+    if not key:
+        return None
+    return "auto" if f":{AUTO_SEGMENT}provider:" in key else "manual"
 
 
 def provider_from_key(key: str | None) -> str | None:
@@ -114,6 +130,7 @@ class Preparation:
     operation: OperationState
     provider: str | None
     reused: bool = False
+    trigger: str | None = None
 
 
 class PreparationService:
@@ -142,7 +159,12 @@ class PreparationService:
         if shot.state != "active":
             raise PreparationNotActiveError("archived")
 
-    def request(self, screenshot_id: int, action: str) -> Preparation:
+    def _after_lock(self, screenshot_id: int, guard) -> None:
+        self._require_active_locked(screenshot_id)
+        if guard is not None:
+            guard()  # Batch 6B: an extra caller check under the same lock
+
+    def request(self, screenshot_id: int, action: str, *, guard=None, auto: bool = False) -> Preparation:
         """Start (or reuse) the preparation. Never calls an adapter itself.
 
         Order: action → provider guard → ownership → active → [locked: fresh
@@ -161,17 +183,26 @@ class PreparationService:
             raise PreparationNotActiveError("archived")  # fast path; not authoritative
         state, reused = self._operations.create_or_reuse_keyed(
             OPERATION_KIND_BY_ACTION[action],
-            idempotency_key(screenshot_id, action, provider),
+            idempotency_key(screenshot_id, action, provider, auto=auto),
             key_prefix=key_prefix(screenshot_id, action),
             reusable=is_reusable,
             # Authoritative: a fresh read under the workspace lock, before reuse
             # or creation. A Safe Burial committed after the fast-path read is
             # seen here, so nothing is created, counted or queued.
-            after_lock=lambda: self._require_active_locked(screenshot_id),
+            after_lock=lambda: self._after_lock(screenshot_id, guard),
             # Raises ConsentRequiredError inside the lock; nothing is written.
             before_create=lambda: self._consent.require_consent(screenshot_id),
         )
-        return Preparation(screenshot_id, action, state, provider, reused)
+        if reused:
+            # Who started the REUSED operation, from its stored key (never this request's).
+            try:
+                op = self._repo.get_operation(state.operation_id)
+            except SQLAlchemyError:
+                op = None
+            trigger = trigger_from_key(op.idempotency_key) if op is not None else None
+        else:
+            trigger = "auto" if auto else "manual"
+        return Preparation(screenshot_id, action, state, provider, reused, trigger)
 
     def latest(self, screenshot_id: int, action: str) -> Preparation | None:
         """The newest preparation for this screenshot and action, if any."""
@@ -185,4 +216,6 @@ class PreparationService:
         if op is None:
             return None
         state = OperationService._state(op)
-        return Preparation(screenshot_id, action, state, provider_from_key(op.idempotency_key))
+        return Preparation(
+            screenshot_id, action, state, provider_from_key(op.idempotency_key), trigger=trigger_from_key(op.idempotency_key)
+        )

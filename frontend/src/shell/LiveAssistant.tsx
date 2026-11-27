@@ -1,4 +1,4 @@
-import type { ProviderMode } from '../api/ai';
+import type { AutoProcessState, ProviderMode } from '../api/ai';
 import type { Screenshot } from '../api/client';
 import { describeAuxiliaryResultOrigin, describeResultOrigin } from '../ai/messages';
 import { getReviveEntry, getReviveSuccess } from '../ai/reviveCoordinator';
@@ -33,6 +33,10 @@ interface Props {
   onClearSelection: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
+  /** Batch 6B: the latest automatic-preparation state per screenshot (when automation is on). */
+  autoStates?: Record<number, AutoProcessState>;
+  /** Batch 6B: bumps when work settled on the server, so the draft panels re-read. */
+  draftEpochs?: Record<number, number>;
 }
 
 /**
@@ -55,6 +59,8 @@ export function LiveAssistant({
   onClearSelection,
   collapsed,
   onToggleCollapsed,
+  autoStates = {},
+  draftEpochs = {},
 }: Props) {
   const one = selected.length === 1 ? selected[0] : null;
   if (collapsed) {
@@ -73,7 +79,7 @@ export function LiveAssistant({
   }
 
   return (
-    <aside className="sg-assistant ui-card" aria-label="Quiet Assistant" data-testid="live-assistant">
+    <aside className="sg-assistant ui-card" aria-label="Quiet Assistant" data-testid="live-assistant" tabIndex={-1}>
       <div className="sg-assistant__head">
         <Ghost size={44} />
         <div>
@@ -121,11 +127,16 @@ export function LiveAssistant({
           onChoose={(c) => onChoose(one.screenshotId, c)}
           onOpen={(el) => onOpen(one.screenshotId, el)}
           onRetry={onRetry}
+          auto={autoStates[one.screenshotId]}
+          epoch={draftEpochs[one.screenshotId] ?? 0}
         />
       )}
 
       <div className="sg-live-links">
-        <p className="sg-muted">Study Notes and editing results are in the classic workspace.</p>
+        <p className="sg-muted">
+          Notes and calendar drafts for one screenshot open right here. Study notes built from several screenshots are
+          in the classic workspace.
+        </p>
         <a className="sg-link" href="?view=classic">Open classic workspace</a>
         <a className="sg-link" href="?demo=1">Explore the visual demo</a>
       </div>
@@ -143,7 +154,11 @@ function OneScreenshot({
   onChoose,
   onOpen,
   onRetry,
+  auto,
+  epoch = 0,
 }: {
+  auto?: AutoProcessState;
+  epoch?: number;
   shot: Screenshot;
   read: AnalysisValidation;
   providerMode: ProviderMode | 'unknown';
@@ -187,7 +202,12 @@ function OneScreenshot({
   const full = read.phase === 'ready' ? read.analysis : null;
   const category = full ? full.classification.category : summary.category;
   const classUncertain = full ? full.classification.uncertain : summary.uncertain;
-  const others = LIVE_ACTION_ORDER.filter((a) => (choice ? a !== choice.action : rule.kind !== 'suggest' || a !== rule.action));
+  // Batch 6B: the server routed this screenshot and prepared that draft automatically.
+  // Only when the server RECORDED that automation started this draft (never inferred from the route).
+  const autoChosen =
+    auto?.preparation?.trigger === 'auto' && auto.route !== null && auto.preparation.action === auto.route.action;
+  const others = LIVE_ACTION_ORDER.filter((a) =>
+    choice ? a !== choice.action : autoChosen ? a !== auto?.route?.action : rule.kind !== 'suggest' || a !== rule.action);
   const choose = (action: LiveActionId, basis: ActionChoice['basis']) => onChoose({ action, basis, category: full ? category : null });
 
   return (
@@ -254,7 +274,15 @@ function OneScreenshot({
 
       <section className="sg-next" aria-label="Next step">
         <h3 className="sg-next__title">Next step</h3>
-        {choice ? (
+        {!choice && autoChosen && auto?.route ? (
+          <div className="sg-next__suggested" role="status">
+            <p>
+              <Badge tone="violet">Chosen automatically · can be wrong</Badge>{' '}
+              <b>{LIVE_ACTIONS[auto.route.action as LiveActionId].label}</b>
+            </p>
+            <p className="sg-muted">{auto.route.reason} Review the draft below, or choose something else.</p>
+          </div>
+        ) : choice ? (
           <div className="sg-next__chosen" role="status">
             <p>
               <Badge tone="green">Chosen by you</Badge> <b>{LIVE_ACTIONS[choice.action].label}</b>
@@ -283,13 +311,13 @@ function OneScreenshot({
         )}
 
         <div className="sg-alt__row">
-          {!choice && rule.kind === 'suggest' && (
+          {!choice && !autoChosen && rule.kind === 'suggest' && (
             <Button size="sm" variant="primary" onClick={() => choose(rule.action, 'accepted_suggestion')}>
               Choose {LIVE_ACTIONS[rule.action].label}
             </Button>
           )}
           <MenuButton
-            label={choice || rule.kind === 'suggest' ? 'Something else' : 'Choose a next step'}
+            label={choice || autoChosen || rule.kind === 'suggest' ? 'Something else' : 'Choose a next step'}
             icon="dots"
             items={others.map((a) => ({ id: a, label: LIVE_ACTIONS[a].label }))}
             onSelect={(a) => choose(a as LiveActionId, 'your_choice')}
@@ -319,13 +347,13 @@ function OneScreenshot({
         )}
         {/* Persisted on the server: shown whenever a draft exists, even after a reload. */}
         <MakeNotesDraft
-          key={id}
+          key={`notes-${id}-${epoch}`}
           screenshot={shot}
           providerMode={providerMode}
           canStart={choice?.action === 'make_notes'}
         />
         <CalendarDraft
-          key={`calendar-${id}`}
+          key={`calendar-${id}-${epoch}`}
           screenshot={shot}
           providerMode={providerMode}
           canStart={choice?.action === 'add_calendar'}

@@ -103,6 +103,14 @@ interface Props {
   analysisAuthority?: Pick<AnalysisAuthority, 'begin' | 'resolve'>;
   pollIntervalMs?: number;
   maxPolls?: number;
+  /**
+   * Batch 6B: automatic preparation is on (confirmed by the server). The manual
+   * Revive button is left to the automatic flow, so the two never both start an
+   * analysis; consent, withdrawal and the saved result stay here.
+   */
+  autoMode?: boolean;
+  /** Batch 6B: the server confirmed a consent GRANT made in this panel. */
+  onConsentGranted?: () => void;
 }
 
 /**
@@ -123,6 +131,8 @@ export function RevivePanel({
   analysisAuthority,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   maxPolls = DEFAULT_MAX_POLLS,
+  autoMode = false,
+  onConsentGranted,
 }: Props) {
   const id = screenshot.screenshotId;
   const archived = screenshot.state === 'archived';
@@ -348,6 +358,7 @@ export function RevivePanel({
       if (res.ok) {
         setWithdrawal(null);
         setConsentLookup(id, res.data ? 'granted' : 'not_granted');
+        if (res.data) onConsentGranted?.();
         setMessage({
           error: false,
           text: res.data
@@ -583,7 +594,7 @@ export function RevivePanel({
         )}
       </div>
 
-      {analysis.phase === 'none' && !archived && confirmed === null && (
+      {analysis.phase === 'none' && !archived && confirmed === null && !autoMode && (
         <div className="sg-revive__row">
           <Button variant="primary" icon="sparkles" disabled={!canRevive} aria-busy={working} onClick={() => void onRevive()}>
             {run.t === 'submitting'

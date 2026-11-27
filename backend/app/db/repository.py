@@ -118,6 +118,19 @@ class WorkspaceRepository:
         stmt = select(models.Workspace).where(models.Workspace.id == self._workspace_id)
         return self._session.scalars(stmt).one_or_none()
 
+    def get_auto_prepare(self) -> bool:
+        """Batch 6B: this workspace's opt-in automation preference (False if absent)."""
+        ws = self.get_workspace()
+        return bool(ws is not None and ws.auto_prepare)
+
+    def set_auto_prepare(self, enabled: bool) -> bool:
+        """Set the preference (caller commits). Returns False if the workspace is gone."""
+        ws = self.get_workspace()
+        if ws is None:
+            return False
+        ws.auto_prepare = bool(enabled)
+        return True
+
     def lock_workspace(self) -> models.Workspace | None:
         """Acquire a real per-workspace write lock to serialize critical sections.
 

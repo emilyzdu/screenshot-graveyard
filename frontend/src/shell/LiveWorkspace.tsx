@@ -19,6 +19,11 @@ import {
 import { CRYPT_GALLERY_NOTE } from '../ai/messages';
 import { useProviderStatus } from '../ai/PrivacyNotice';
 import { RevivePanel } from './RevivePanel';
+import { AutoPilot, AUTO_READ_TIMEOUT_MS } from './AutoPilot';
+import { AutomationToggle } from './AutomationToggle';
+import { useAutomation } from './useAutomation';
+import { getAutoProcess, type AutoProcessState } from '../api/ai';
+import { boundedFetch } from '../api/boundedFetch';
 import { ArchivedDrafts } from './ArchivedDrafts';
 import { LiveAssistant } from './LiveAssistant';
 import { LIVE_ACTIONS, epitaphProvenanceLabel, type ActionChoice } from './nextAction';
@@ -191,6 +196,14 @@ export default function LiveWorkspace() {
   const uploadInFlight = useRef(false);
   // Read-only provider check (GET /api/ai/provider-mode). Revive is offered only in fake mode.
   const provider = useProviderStatus();
+  // Batch 6B: opt-in automatic preparation (server preference; unknown = off).
+  const automation = useAutomation(gallery.phase === 'ready');
+  const [autoStates, setAutoStates] = useState<Record<number, AutoProcessState>>({});
+  const [autoEpochs, setAutoEpochs] = useState<Record<number, number>>({});
+  const [consentSignal, setConsentSignal] = useState(0);
+  const putAutoState = useCallback((st: AutoProcessState) => {
+    setAutoStates((cur) => ({ ...cur, [st.screenshotId]: st }));
+  }, []);
   // Batch 3B: selection (Workspace view), the user's chosen next action per
   // screenshot (transient: this page only, never sent), and the assistant panel.
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -316,6 +329,9 @@ export default function LiveWorkspace() {
         return;
       }
       const saved = `Saved ${result.accepted} screenshot${result.accepted === 1 ? '' : 's'}.`;
+      // Batch 6B: with automation on, one new screenshot opens straight to its
+      // consent step. Opening only reads; nothing is sent until the user allows it.
+      const single = result.accepted === 1 ? result.results.find((r) => r.status === 'accepted')?.screenshotId ?? null : null;
       const rejected = result.results
         .filter((file) => file.status === 'rejected')
         .map((file) => `${file.filename}: ${file.error ?? 'Could not save this file.'}`);
@@ -325,6 +341,11 @@ export default function LiveWorkspace() {
         error: rejected.length > 0 || refreshFailed,
         text: [saved, ...rejected, ...(refreshFailed ? ['Could not refresh the list. Reload to see it.'] : [])].join(' '),
       });
+      if (single !== null && !refreshFailed && automation.enabled && detailRef.current === null) {
+        const opener = document.getElementById('sg-main') ?? document.body;
+        setDrawerMsg(null);
+        setDetail({ id: String(single), opener, session: ++sessionCounter.current });
+      }
     } finally {
       uploadInFlight.current = false;
       setUploading(false);
@@ -467,6 +488,30 @@ export default function LiveWorkspace() {
   // The same eligibility check as at click time (see chooseAction), from the
   // shared authority's LATEST read: pending, failed and invalid reads suggest nothing.
   const rule = currentSuggestionRule(analysisAuthority, selected);
+  // Batch 6B: one read of the automatic state for the screenshot shown in the
+  // assistant (the drawer's panel keeps it current while it is open).
+  const selectedAutoId = automation.enabled && selected ? selected.screenshotId : null;
+  const selectedAutoEpoch = selectedAutoId !== null ? autoEpochs[selectedAutoId] ?? 0 : 0;
+  useEffect(() => {
+    if (selectedAutoId === null) return;
+    const controller = new AbortController();
+    void getAutoProcess(selectedAutoId, boundedFetch(AUTO_READ_TIMEOUT_MS, controller.signal)).then((r) => {
+      if (!controller.signal.aborted && r.ok) putAutoState(r.data);
+    });
+    return () => controller.abort();
+  }, [selectedAutoId, selectedAutoEpoch, putAutoState]);
+  const settleAuto = (sid: number) => {
+    setAutoEpochs((cur) => ({ ...cur, [sid]: (cur[sid] ?? 0) + 1 }));
+    void refreshGallery();
+  };
+  const reviewAuto = (sid: number) => {
+    setDetail(null);
+    setDrawerMsg(null);
+    setView('workspace');
+    setSelectedIds([sid]);
+    setAssistantCollapsed(false);
+    requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-testid="live-assistant"]')?.focus());
+  };
   const suggestion = rule.kind === 'suggest' ? rule.action : undefined;
 
   // Check the committed selection and rule at the write boundary, even if a
@@ -557,6 +602,9 @@ export default function LiveWorkspace() {
               <WorkspaceHeading demo={false} />
             )}
             {gallery.phase === 'ready' && !archived && (
+              <AutomationToggle automation={automation} providerMode={provider.mode} />
+            )}
+            {gallery.phase === 'ready' && !archived && (
               <UploadDropZone
                 onFiles={upload}
                 disabled={uploading}
@@ -643,6 +691,8 @@ export default function LiveWorkspace() {
             onClearSelection={() => setSelectedIds([])}
             collapsed={assistantCollapsed}
             onToggleCollapsed={() => setAssistantCollapsed((c) => !c)}
+            autoStates={automation.enabled ? autoStates : undefined}
+            draftEpochs={autoEpochs}
           />
         </div>
       </div>
@@ -680,12 +730,25 @@ export default function LiveWorkspace() {
           </dl>
           {detailRecord && (
             <RevivePanel
+              key={`revive-${autoEpochs[detailRecord.screenshotId] ?? 0}`}
+              autoMode={automation.enabled}
+              onConsentGranted={() => setConsentSignal((n) => n + 1)}
               screenshot={detailRecord}
               providerMode={provider.mode}
               providerLoading={provider.loading}
               refreshProvider={provider.refresh}
               onAnalysisChanged={() => void refreshGallery()}
               analysisAuthority={analysisAuthority}
+            />
+          )}
+          {detailRecord && !detailArchived && automation.enabled && (
+            <AutoPilot
+              screenshot={detailRecord}
+              providerMode={provider.mode}
+              startSignal={consentSignal}
+              onState={putAutoState}
+              onSettled={() => settleAuto(detailRecord.screenshotId)}
+              onReview={reviewAuto}
             />
           )}
           {/* An archived screenshot's saved drafts stay readable; active ones live in the assistant. */}

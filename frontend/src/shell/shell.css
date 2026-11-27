@@ -314,3 +314,12 @@
 .sg-approval h5 { margin: 0; font-size: 13px; }
 .sg-approval label { display: block; }
 .sg-approval ul { margin: 4px 0 0; padding-left: 18px; }
+
+/* Batch 6B: automatic preparation */
+.sg-auto-toggle { margin: 0 0 12px; padding: 12px 14px; border: 1px solid var(--sg-line); border-radius: 14px; background: rgba(13, 8, 19, 0.4); font-size: 13px; }
+.sg-auto-toggle__label { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+.sg-auto-toggle__label input { width: 16px; height: 16px; }
+.sg-auto-toggle p { margin: 6px 0 0; }
+.sg-auto { margin-top: 14px; display: grid; gap: 10px; padding: 14px; border-radius: 14px; border: 1px solid var(--sg-line); background: rgba(13, 8, 19, 0.4); font-size: 13px; }
+.sg-auto p { margin: 0; }
+.sg-auto__steps { margin: 2px 0; }

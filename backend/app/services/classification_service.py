@@ -232,7 +232,12 @@ class ClassificationService:
         #    or transaction sits between them. A withdrawal committed before it
         #    means no adapter call at all.
         try:
-            ticket = self._dispatch.authorize(operation_id, [screenshot_id], adapter_provider=getattr(self._adapter, "provider_id", None))
+            # Batch 6B: snapshot the analysis under the dispatch lock; a result
+            # that returns after a newer version (e.g. the user's edit) is not saved.
+            ticket = self._dispatch.authorize(
+                operation_id, [screenshot_id], adapter_provider=getattr(self._adapter, "provider_id", None),
+                snapshot_analysis=True,
+            )
         except DispatchSupersededError:
             return ClassificationOutcome(operation=self._operations.get(operation_id))
         except DispatchDeniedError as exc:

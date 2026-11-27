@@ -91,6 +91,8 @@ def _preparation_dict(p: Preparation) -> dict:
         # The provider recorded with this preparation (from its durable key).
         "provider": p.provider,
         "reused": p.reused,
+        # Batch 6B: who started it ("auto" | "manual"), from its durable key.
+        "trigger": p.trigger,
     }
 
 

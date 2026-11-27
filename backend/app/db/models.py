@@ -22,7 +22,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy import event
+from sqlalchemy import event, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -38,6 +38,11 @@ class Workspace(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     # Only sha256(token) is stored; the raw token lives only in the cookie.
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    # Batch 6B: opt-in automatic analysis -> routing -> draft preparation. Never
+    # a consent: each screenshot still needs its own grant, checked at dispatch.
+    auto_prepare: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )

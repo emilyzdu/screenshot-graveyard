@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 
 from app.ai.provider import get_ai_adapter
 from app.db.session import get_session
+from app.services.auto_process_service import ClassifyNotNeededError, request_classify
 from app.services.classification_service import ClassificationService
 from app.services.consent_service import (
     ConsentRequiredError,
@@ -117,9 +118,23 @@ def build_classification_router() -> APIRouter:
                     content=_error_body("service_unavailable", "Service temporarily unavailable"),
                 )
 
-            operations = OperationService(session, workspace_id)
+            # Batch 6B: one running analysis per screenshot. A repeated request
+            # (double click, lost response, or automatic processing) reuses the
+            # running operation instead of sending the image twice.
             try:
-                operation = operations.create_pending("classify")
+                operation, reused = request_classify(session, workspace_id, screenshot_id)
+            except ClassifyNotNeededError:
+                # Batch 6B: an analysis already stands; a second initial one
+                # would only pay again. Regenerating is the explicit Redo.
+                return JSONResponse(
+                    status_code=409,
+                    content=_error_body("already_analyzed", "This screenshot already has an analysis. Use Redo to regenerate it."),
+                )
+            except ConsentRequiredError:
+                return JSONResponse(
+                    status_code=403,
+                    content=_error_body("consent_required", "AI processing consent required"),
+                )
             except OperationQuotaExceededError:
                 return JSONResponse(
                     status_code=429,
@@ -135,9 +150,10 @@ def build_classification_router() -> APIRouter:
 
         # Schedule the real work AFTER the pending operation is committed. The
         # worker re-checks consent immediately before the single adapter call.
-        background.add_task(
-            _run_classification_job, workspace_id, screenshot_id, operation.operation_id
-        )
+        if not reused:
+            background.add_task(
+                _run_classification_job, workspace_id, screenshot_id, operation.operation_id
+            )
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={
