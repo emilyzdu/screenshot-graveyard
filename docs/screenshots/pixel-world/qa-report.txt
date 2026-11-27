@@ -1,0 +1,46 @@
+[desktop] overflow world: no {"sw":1280,"iw":1280,"ov":null}
+[desktop] lumi moved: translate(346px, 182px) -> translate(296px, 204px) (ok)
+[desktop] overflow action-card: no {"sw":1280,"iw":1280,"ov":{"sw":754,"cw":754}}
+[desktop] focus returned to ghost after Escape: ok
+[desktop] overflow upload-well: no {"sw":1280,"iw":1280,"ov":{"sw":554,"cw":554}}
+[desktop] upload-well: closed=true focusBackOnOpener=true
+[desktop] overflow clock-tower: no {"sw":1280,"iw":1280,"ov":{"sw":554,"cw":554}}
+[desktop] clock-tower: closed=true focusBackOnOpener=true
+[desktop] overflow library: no {"sw":1280,"iw":1280,"ov":{"sw":554,"cw":554}}
+[desktop] library: closed=true focusBackOnOpener=true
+[desktop] overflow approval-altar: no {"sw":1280,"iw":1280,"ov":{"sw":554,"cw":554}}
+[desktop] approval-altar: closed=true focusBackOnOpener=true
+[desktop] overflow crypt: no {"sw":1280,"iw":1280,"ov":{"sw":554,"cw":554}}
+[desktop] crypt: closed=true focusBackOnOpener=true
+[desktop] overflow portal: no {"sw":1280,"iw":1280,"ov":{"sw":554,"cw":554}}
+[desktop] portal: closed=true focusBackOnOpener=true
+[desktop] overflow quick-queue: no {"sw":1280,"iw":1280,"ov":{"sw":554,"cw":554}}
+[desktop] quick-queue: closed=true focusBackOnOpener=true
+[desktop] overflow settings: no {"sw":1280,"iw":1280,"ov":{"sw":554,"cw":554}}
+[desktop] settings: closed=true focusBackOnOpener=true
+[desktop] portal text has "Not connected": true; contains delivered: false
+[desktop] API requests in demo mode: 0 
+[desktop] console errors/warnings: 0
+[narrow] overflow world: no {"sw":390,"iw":390,"ov":null}
+[narrow] lumi moved: translate(346px, 182px) -> translate(296px, 204px) (ok)
+[narrow] overflow action-card: no {"sw":390,"iw":390,"ov":{"sw":386,"cw":386}}
+[narrow] focus returned to ghost after Escape: ok
+[narrow] overflow upload-well: no {"sw":390,"iw":390,"ov":{"sw":386,"cw":386}}
+[narrow] upload-well: closed=true focusBackOnOpener=true
+[narrow] overflow clock-tower: no {"sw":390,"iw":390,"ov":{"sw":386,"cw":386}}
+[narrow] clock-tower: closed=true focusBackOnOpener=true
+[narrow] overflow library: no {"sw":390,"iw":390,"ov":{"sw":386,"cw":386}}
+[narrow] library: closed=true focusBackOnOpener=true
+[narrow] overflow approval-altar: no {"sw":390,"iw":390,"ov":{"sw":386,"cw":386}}
+[narrow] approval-altar: closed=true focusBackOnOpener=true
+[narrow] overflow crypt: no {"sw":390,"iw":390,"ov":{"sw":386,"cw":386}}
+[narrow] crypt: closed=true focusBackOnOpener=true
+[narrow] overflow portal: no {"sw":390,"iw":390,"ov":{"sw":386,"cw":386}}
+[narrow] portal: closed=true focusBackOnOpener=true
+[narrow] overflow quick-queue: no {"sw":390,"iw":390,"ov":{"sw":386,"cw":386}}
+[narrow] quick-queue: closed=true focusBackOnOpener=true
+[narrow] overflow settings: no {"sw":390,"iw":390,"ov":{"sw":386,"cw":386}}
+[narrow] settings: closed=true focusBackOnOpener=true
+[narrow] portal text has "Not connected": true; contains delivered: false
+[narrow] API requests in demo mode: 0 
+[narrow] console errors/warnings: 0

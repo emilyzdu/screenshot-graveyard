@@ -31,3 +31,9 @@ export function buildDemoScreenshots(count = 9): Screenshot[] {
   );
   return out;
 }
+
+/** PROTOTYPE DATA: invented approval state for the Approval Altar preview. */
+export function demoApproval(id: number): 'approved' | 'ready' | null {
+  const r = (((id - 9001) % 3) + 3) % 3;
+  return r === 1 ? 'approved' : r === 2 ? 'ready' : null;
+}

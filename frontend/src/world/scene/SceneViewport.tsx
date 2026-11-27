@@ -89,7 +89,7 @@ export function SceneViewport({ layout, selectedId, demo, controlsEnabled, onSel
   return (
     <div className="pw-stage-host" ref={hostRef}>
       <div className="pw-stage-frame" style={scaledStyle}>
-        <div className="pw-stage" role="application" aria-label="The Lantern Graveyard. Move Lumi with WASD or the arrow keys." data-scale={scale}
+        <div className="pw-stage" role="application" tabIndex={-1} aria-label="The Lantern Graveyard. Move Lumi with WASD or the arrow keys." data-scale={scale}
           style={{ transform: `scale(${scale})` }}>
           <img className="pw-layer" src={assetUrl('bg-sky')} alt="" style={{ top: 0 }} />
           <img className="pw-layer" src={assetUrl('moon')} alt="" style={{ left: 270, top: 10, width: 96, height: 96 }} />

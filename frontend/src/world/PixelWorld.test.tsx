@@ -6,7 +6,13 @@ const client = vi.hoisted(() => ({
   getWorkspace: vi.fn<() => Promise<WorkspaceResult>>(),
   listScreenshots: vi.fn<() => Promise<ListResult>>(),
 }));
-vi.mock('../api/client', () => client);
+vi.mock('../api/client', () => ({ ...client, imageUrl: (id: number) => `/api/screenshots/${id}/image` }));
+const down = vi.hoisted(() => () => Promise.resolve({ ok: false as const, status: 503, code: 'down', message: 'down' }));
+vi.mock('../api/ai', async (orig) => ({
+  ...(await orig<typeof import('../api/ai')>()),
+  getProviderMode: down, getConsent: down, getDisclosure: down, getAnalysis: down, getAutomation: down,
+  getMakeNotesPreparation: down, getEventDraftPreparation: down,
+}));
 
 import PixelWorld from './PixelWorld';
 
@@ -32,7 +38,7 @@ describe('PixelWorld', () => {
     expect(screen.getByText(/Crypt: 1 resting screenshot/)).toBeInTheDocument();
     expect(screen.queryByText(/Demo data|not reachable/)).not.toBeInTheDocument();
     fireEvent.click(ghosts[1]);
-    expect(screen.getByTestId('inspect')).toHaveTextContent('real-2.png');
+    expect(screen.getByRole('dialog', { name: /real-2\.png/ })).toBeInTheDocument();
   });
 
   it('collapses more than 24 ghosts into a crowd marker', async () => {
@@ -62,8 +68,8 @@ describe('PixelWorld', () => {
     render(<PixelWorld />);
     const tower = await screen.findByRole('button', { name: 'Clock Tower' });
     fireEvent.click(tower);
-    expect(screen.getByTestId('opened')).toHaveTextContent('calendar');
-    expect(screen.getByRole('link', { name: /List view/ })).toHaveAttribute('href', '?');
+    expect(screen.getByRole('dialog', { name: /Clock Tower/ })).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: /List view/ })[0]).toHaveAttribute('href', '?');
     const lumi = screen.getByTestId('lumi');
     const before = lumi.style.transform;
     const input = document.createElement('input'); document.body.appendChild(input);
