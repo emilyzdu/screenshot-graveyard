@@ -51,6 +51,7 @@ from app.services.event_draft_artifact_service import (
     EventDraftNotFoundError,
     EventDraftUnavailableError,
 )
+from app.services import action_plan_service as _plans
 from app.services.study_note_artifact_service import (
     NOTE_FIELDS,
     StudyNoteArtifactNotFoundError,
@@ -60,9 +61,17 @@ from app.services.study_note_artifact_service import (
 
 KIND_STUDY_NOTE = "study_note"
 KIND_EVENT_DRAFT = "event_draft"
-APPROVABLE_KINDS = frozenset({KIND_STUDY_NOTE, KIND_EVENT_DRAFT})
+# External tools: an AI action plan is approved like a draft (exact version +
+# content SHA-256). Approval is not execution: running an approved action is a
+# separate, explicitly authorized request (tool_execution_service).
+KIND_ACTION_PLAN = _plans.KIND_ACTION_PLAN
+APPROVABLE_KINDS = frozenset({KIND_STUDY_NOTE, KIND_EVENT_DRAFT, KIND_ACTION_PLAN})
 _AI_ORIGINS = frozenset({"ai_generate", "ai_redo"})
-_FIELDS_BY_KIND = {KIND_STUDY_NOTE: frozenset(NOTE_FIELDS), KIND_EVENT_DRAFT: frozenset(EVENT_DRAFT_FIELDS)}
+_FIELDS_BY_KIND = {
+    KIND_STUDY_NOTE: frozenset(NOTE_FIELDS),
+    KIND_EVENT_DRAFT: frozenset(EVENT_DRAFT_FIELDS),
+    KIND_ACTION_PLAN: frozenset(_plans.PLAN_FIELDS) | _plans.ACK_FIELDS,
+}
 # Status is assembled from several reads; retry when the pointer moved meanwhile.
 _STATUS_ATTEMPTS = 3
 
@@ -177,6 +186,14 @@ def _notes_eligibility(view) -> tuple[list[dict], list[str], list[str]]:
     return [], uncertain, ai_fields
 
 
+def _eligibility_for(kind: str, view) -> tuple[list[dict], list[str], list[str]]:
+    if kind == KIND_STUDY_NOTE:
+        return _notes_eligibility(view)
+    if kind == KIND_ACTION_PLAN:
+        return _plans.plan_eligibility(view)
+    return _calendar_eligibility(view)
+
+
 class ApprovalService:
     def __init__(self, session: Session, workspace_id: int) -> None:
         if workspace_id is None:
@@ -185,6 +202,7 @@ class ApprovalService:
         self._repo = WorkspaceRepository(session, workspace_id)
         self._notes = StudyNoteArtifactService(session, workspace_id)
         self._events = EventDraftArtifactService(session, workspace_id)
+        self._plans = _plans.ActionPlanService(session, workspace_id)
 
     # ------------------------------------------------------------------ reads
     def status(self, artifact_id: int) -> ApprovalStatus:
@@ -349,16 +367,16 @@ class ApprovalService:
         try:
             if artifact.kind == KIND_STUDY_NOTE:
                 return self._notes.get_version(artifact.id, version_id)
+            if artifact.kind == KIND_ACTION_PLAN:
+                return self._plans.get_version(artifact.id, version_id)
             return self._events.get_version(artifact.id, version_id)
-        except (StudyNoteArtifactNotFoundError, EventDraftNotFoundError) as exc:
+        except (StudyNoteArtifactNotFoundError, EventDraftNotFoundError, _plans.ActionPlanNotFoundError) as exc:
             raise ApprovalNotFoundError("not found") from exc
-        except (StudyNoteArtifactUnavailableError, EventDraftUnavailableError) as exc:
+        except (StudyNoteArtifactUnavailableError, EventDraftUnavailableError, _plans.ActionPlanUnavailableError) as exc:
             raise ApprovalUnavailableError("approval service unavailable") from exc
 
     def _eligibility(self, kind: str, view, *, check_sources: bool) -> Eligibility:
-        reasons, uncertain, ai_fields = (
-            _notes_eligibility(view) if kind == KIND_STUDY_NOTE else _calendar_eligibility(view)
-        )
+        reasons, uncertain, ai_fields = _eligibility_for(kind, view)
         if view.field_origins is None:
             reasons = [{
                 "field": None, "code": "history_unverified",
@@ -409,9 +427,7 @@ class ApprovalService:
         ai_fields = self._field_list(row.ai_origin_fields_json, allowed)
         # The acknowledgement set must be exactly what THAT immutable version
         # required (same rule as approve()): nothing missing, extra or swapped.
-        _, required, _ = (
-            _notes_eligibility(view) if artifact.kind == KIND_STUDY_NOTE else _calendar_eligibility(view)
-        )
+        _, required, _ = _eligibility_for(artifact.kind, view)
         if sorted(acknowledged) != required:
             raise ApprovalUnavailableError("approval service unavailable")
         return ApprovalRecord(

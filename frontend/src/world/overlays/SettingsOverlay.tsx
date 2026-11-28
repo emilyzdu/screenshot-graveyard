@@ -1,6 +1,7 @@
 import { AutomationToggle } from '../../shell/AutomationToggle';
 import { useAutomation } from '../../shell/useAutomation';
 import { useProviderStatus } from '../../ai/PrivacyNotice';
+import { ConnectedApps } from '../../shell/ConnectedApps';
 
 function LiveSettings() {
   const provider = useProviderStatus();
@@ -11,6 +12,8 @@ function LiveSettings() {
     <>
       <p><strong>AI provider</strong> <span className="pw-badge-text" data-testid="provider-badge">{label}</span></p>
       <AutomationToggle automation={automation} providerMode={provider.mode} />
+      <h3>Connected apps</h3>
+      <ConnectedApps />
     </>
   );
 }

@@ -23,7 +23,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy import event, false
+from sqlalchemy import event, false, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -330,6 +330,149 @@ class Approval(Base):
     approved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
+
+
+class ExternalIdentity(Base):
+    """The workspace's opaque user id at the external tool provider (Composio).
+    One random id per workspace, minted server-side and never derived from the
+    workspace token, so a leaked provider id cannot reveal or unlock the
+    workspace, and two workspaces can never share a provider user (and with it
+    any connected account).
+    """
+    __tablename__ = "external_identity"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", name="external_identity_workspace"),
+        UniqueConstraint("external_user_id", name="external_identity_user"),
+        Index("ix_external_identity_workspace_id", "workspace_id"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspace.id"), nullable=False)
+    external_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+class ToolConnection(Base):
+    """One connected account at an external app, bound to ONE workspace.
+    ``connected_account_id`` comes only from the provider's own response to a
+    link request this server made for this workspace's external user; it is
+    never accepted from the browser or the AI model. ``status``: ``pending``
+    (link issued, authorization not confirmed), ``active`` (confirmed with the
+    provider), ``failed`` (authorization failed or expired) or ``disconnected``
+    (terminal: never used again). Rows are kept as history.
+    """
+    __tablename__ = "tool_connection"
+    __table_args__ = (
+        Index("ix_tool_connection_workspace_id", "workspace_id"),
+        Index("ix_tool_connection_workspace_toolkit", "workspace_id", "toolkit"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspace.id"), nullable=False)
+    toolkit: Mapped[str] = mapped_column(String(32), nullable=False)
+    # ``fake`` or ``composio``: a simulated connection is never presented as real.
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    connected_account_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    # The server-controlled authorization attempt that may complete this
+    # connection: sha256 of a single-use token that only travels in the hosted
+    # flow's callback URL, an expiry, and when it was consumed. A pending
+    # connection becomes active ONLY by presenting that token from the
+    # initiating workspace before expiry (never by provider status alone).
+    attempt_token_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempt_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempt_consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+# Execution statuses that hold a scope / delivery identity (see ToolExecution).
+# "rejected" is no longer produced (every post-send failure is "unknown") but is
+# kept unresolved so any such row still blocks its whole scope.
+EXECUTION_UNRESOLVED = ("reserved", "executing", "unknown", "rejected")
+EXECUTION_DELIVERY_HELD = ("reserved", "executing", "succeeded", "unknown", "rejected")
+
+
+def _in_list(values) -> str:
+    return "status IN (" + ", ".join(f"'{v}'" for v in values) + ")"
+
+
+class ToolExecution(Base):
+    """One authorized attempt to run ONE approved planned action (an external write).
+    The row is committed (``executing``) BEFORE the provider is called; from
+    that commit on the request is treated as possibly sent. It binds the exact
+    plan version, action index, approval, tool slug, toolkit version,
+    connection and a SHA-256 of the exact arguments sent. ``status``:
+    ``executing``, ``succeeded`` (with a receipt: the external item id),
+    ``failed`` (the provider definitely did not perform the write) or
+    ``unknown`` (it may have happened; never retried automatically).
+    Lifecycle: ``reserved`` (authorized, provably NOT sent) -> at the dispatch
+    boundary, under the workspace lock, either ``cancelled`` (a stop operation
+    won, or a re-check failed; never sent) or ``executing`` (committed BEFORE
+    the provider call: the linearization point, possibly sent from here) ->
+    ``succeeded`` | ``rejected`` | ``unknown`` | ``failed`` (the connection
+    could not be opened, so nothing was sent).
+
+    Delivery identity is stable across replans and revisions and is NOT
+    derived from the plan artifact: ``scope_key`` = (workspace, screenshot,
+    tool, destination) and ``delivery_key`` = scope + normalized intended
+    action. Two partial unique indexes make the duplicate rules structural:
+    at most one unresolved execution per scope, and at most one execution per
+    delivery identity that succeeded, was rejected or may still have happened.
+    """
+    __tablename__ = "tool_execution"
+    __table_args__ = (
+        UniqueConstraint("artifact_id", "action_index", "attempt", name="tool_execution_action_attempt"),
+        Index("ix_tool_execution_workspace_id", "workspace_id"),
+        Index("ix_tool_execution_artifact_id", "artifact_id"),
+        Index("ix_tool_execution_workspace_scope", "workspace_id", "scope_key"),
+        Index(
+            "uq_tool_execution_open_scope", "workspace_id", "scope_key", unique=True,
+            sqlite_where=text(_in_list(EXECUTION_UNRESOLVED)),
+            postgresql_where=text(_in_list(EXECUTION_UNRESOLVED)),
+        ),
+        Index(
+            "uq_tool_execution_delivery", "workspace_id", "delivery_key", unique=True,
+            sqlite_where=text(_in_list(EXECUTION_DELIVERY_HELD)),
+            postgresql_where=text(_in_list(EXECUTION_DELIVERY_HELD)),
+        ),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspace.id"), nullable=False)
+    artifact_id: Mapped[int] = mapped_column(ForeignKey("artifact.id"), nullable=False)
+    artifact_version_id: Mapped[int] = mapped_column(ForeignKey("artifact_version.id"), nullable=False)
+    approval_id: Mapped[int] = mapped_column(ForeignKey("approval.id"), nullable=False)
+    screenshot_id: Mapped[int] = mapped_column(ForeignKey("screenshot.id"), nullable=False)
+    scope_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    action_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    tool_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    toolkit: Mapped[str] = mapped_column(String(32), nullable=False)
+    toolkit_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    connection_id: Mapped[int] = mapped_column(ForeignKey("tool_connection.id"), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Stable delivery identity (see the class docstring). Stamped into the
+    # external item where the tool supports it (Google Calendar private
+    # extended property) and required back in the receipt.
+    delivery_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    arguments_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    external_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # True: the receipt carried our delivery marker. False: the app returned an
+    # item id that could not be matched to this request (Notion, Gmail).
+    receipt_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    provider_log_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+    # Set by the reserved -> executing transition (the linearization point).
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AppendOnlyViolationError(Exception):

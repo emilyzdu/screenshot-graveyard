@@ -730,6 +730,35 @@ Per Req 14.7, the external-write properties (27, 28; INV-8/INV-9) are exercised 
 | INV-9 (uncertain retry no duplicate) — P1 | Delivery_Service + `idempotency_key` (P1) | P28 (P1) |
 | INV-10 (never permanently delete originals) | No delete endpoint, file store no-delete, archive retains bytes | P2, P9, P11, P26 |
 
+## External tools via Composio (AMD-2)
+
+Details: `docs/composio-integration.md`. Summary of the design decisions:
+
+- **Layering.** `app/tools/` holds the bounded catalog, the transport Protocol,
+  the Composio REST v3.1 transport (httpx; the `composio` SDK is not used
+  because it requires `openai>=2.48`), a network-free fake transport and the
+  server-side argument builder. Services: `tool_connection_service`,
+  `action_plan_service`, `tool_execution_service`; data access through the
+  workspace-scoped `ToolRepository`.
+- **Data model** (migration `f8d3c0a50001`): `external_identity` (one provider
+  user id per workspace), `tool_connection` (connected account, status and the
+  hashed single-use connection attempt), `tool_execution` (one row per
+  authorized write attempt with plan version, approval, delivery identity,
+  argument hash, status and receipt). Plans are `action_plan` artifacts with
+  append-only versions; approvals use the existing `approval` ledger.
+- **Execution state machine.** `reserved` (not sent) -> dispatch boundary
+  (provider re-check, then a locked fresh re-validation) -> `cancelled`, or the
+  conditional `reserved -> executing` commit, which is the linearization point
+  -> `succeeded` | `unknown` | `failed`. Stop operations (disconnect, plan edit,
+  Safe Burial) take the workspace lock and cancel `reserved` rows in the same
+  transaction. All settlement uses conditional updates.
+- **Duplicate prevention.** `scope_key` (workspace, screenshot, tool, app) and
+  `delivery_key` (scope + normalized intended action), checked under the lock
+  and enforced by partial unique indexes (SQLite and PostgreSQL).
+- **INV-8/INV-9 (Properties 27 and 28).** Success needs a receipt (Calendar:
+  our private marker); anything without proof of non-dispatch is `unknown` and
+  never retried.
+
 ## Unresolved Implementation Risks
 
 - **Lost cookie → permanent inaccessibility (accepted).** The workspace is addressable only by the cookie token; by design there is no recovery and no token-bearing resume URL (CORRECTION 1). If a visitor clears the cookie or switches browsers, their workspace may become **permanently inaccessible**. **Accepted minimal mitigation:** a clear in-UI warning that data is tied to this browser, plus a user-initiated **Markdown export** of their own study notes as the only "take your data out" path (not a token recovery). Full cross-device recovery would require accounts and is out of scope.
@@ -737,4 +766,5 @@ Per Req 14.7, the external-write properties (27, 28; INV-8/INV-9) are exercised 
 - **In-process background-task non-durability.** `BackgroundTask`s do not survive a process restart (CORRECTION 4). The startup/periodic stale-pending sweep converts stuck operations to `failed`, but an operation interrupted by a restart will not auto-resume — the user must retry (which safely creates a new operation/version). A durable queue is deliberately out of scope.
 - **AI latency and cost.** Multimodal calls can be slow and metered. Mitigated by the async 202+poll model, an adapter timeout (→ failed/uncertain), per-workspace AI-call quotas, and the `fake_adapter` for tests. Residual risk: real-model latency/cost under judging load; quotas bound the blast radius.
 - **SQLite→Postgres parity.** Minor behavioral differences (e.g., constraint timing) between engines. Mitigated by running the same repository/property tests on SQLite in CI and validating migrations against Postgres before deploy.
+- **External tools (AMD-2).** Live Composio behaviour, provider-identity confirmation for hosted connections, PostgreSQL behaviour of the new partial indexes, and the Calendar receipt shape are unverified; live writes and public connections stay disabled. An unknown outcome blocks its scope until a resolution flow exists. See `docs/composio-integration.md`.
 - **Cross-origin deployment would weaken CSRF posture.** The CSRF design assumes same-origin. A future cross-origin split would require `SameSite=None; Secure` plus explicit CSRF tokens and CORS allow-listing — explicitly out of scope for P0.

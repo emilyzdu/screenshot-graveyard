@@ -40,6 +40,13 @@ Burial** archives, and **Resurrection** restores.
   adapter with mocked tests, configured request deadlines, zero automatic
   retries, bounded inputs/output tokens, and `store=False` requests.
 
+- External tools via Composio (AMD-2): the AI proposes a validated action plan
+  (Google Calendar event, Notion page, Gmail draft, or no action) from one
+  consented screenshot; the user edits, approves the exact version and runs
+  each action separately. Off by default (`EXTERNAL_TOOLS_MODE=off`); a
+  network-free simulated mode is available. See
+  [docs/composio-integration.md](docs/composio-integration.md).
+
 ### Not yet verified or incomplete
 
 - No live OpenAI request has been run from this repository; model behavior,
@@ -53,6 +60,9 @@ Burial** archives, and **Resurrection** restores.
   complete. There is no public production deployment or live demo URL.
 - Local SQLite is tested; PostgreSQL integration, mounted-volume durability,
   and multi-instance reliability are not yet verified.
+- External tools: no real Composio call or account write has been made.
+  `COMPOSIO_ALLOW_LIVE_WRITES` and `COMPOSIO_PUBLIC_CONNECT` stay off; the
+  public-production blockers are listed in the integration document.
 
 ## Tech stack
 

@@ -31,8 +31,9 @@ from app.db.repository import CrossWorkspaceError, QuotaExceededError, Workspace
 from app.services.global_usage_service import GlobalAIBudgetExceededError, GlobalUsageService
 
 
-# event_draft (Batch 4B) is a metered AI operation like the others.
-AI_OPERATION_KINDS = frozenset({"classify", "study_note", "redo", "event_draft"})
+# event_draft (Batch 4B) and action_plan (external tools) are metered AI
+# operations like the others.
+AI_OPERATION_KINDS = frozenset({"classify", "study_note", "redo", "event_draft", "action_plan"})
 
 
 @dataclass

@@ -680,14 +680,14 @@ class WorkspaceRepository:
         return int(self._session.scalar(stmt) or 0)
 
     def count_ai_operations(self) -> int:
-        """Number of AI operations (classify/study_note/redo/event_draft) for this workspace.
+        """Number of AI operations (classify/study_note/redo/event_draft/action_plan) for this workspace.
 
         Counts the operation rows that represent metered AI calls, used to
         enforce the per-workspace AI-call quota.
         """
         from sqlalchemy import func
 
-        ai_kinds = ("classify", "study_note", "redo", "event_draft")
+        ai_kinds = ("classify", "study_note", "redo", "event_draft", "action_plan")
         stmt = select(func.count()).select_from(models.Operation).where(
             models.Operation.workspace_id == self._workspace_id,
             models.Operation.kind.in_(ai_kinds),

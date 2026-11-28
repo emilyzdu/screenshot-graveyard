@@ -122,3 +122,15 @@
 @media (max-width: 520px) { .pw-overlay-backdrop { padding: 0; } .pw-overlay { max-height: 100vh; border-width: 2px; } }
 @media (prefers-reduced-motion: reduce) { .pw-stamp-pad.is-stamped .pw-stamp { animation: none; } }
 .pw-stage:focus { outline: none; }
+
+/* External tools: connected apps and AI action plans (functional styling only). */
+.sg-apps { list-style: none; padding: 0; margin: 6px 0; display: grid; gap: 6px; }
+.sg-plan { border-top: 1px solid var(--pw-line); margin-top: 12px; padding-top: 8px; }
+.sg-plan__action { border: 1px solid var(--pw-line); border-radius: 8px; padding: 8px 10px; margin: 8px 0; }
+.sg-plan__action h4 { margin: 0 0 4px; }
+.sg-plan__edit { border: 0; padding: 0; margin: 6px 0; display: grid; gap: 4px; }
+.sg-plan__field { display: grid; gap: 2px; font-size: 12px; }
+.sg-plan__field input, .sg-plan__field textarea { font: inherit; font-size: 13px; }
+.sg-plan__problems { color: #f5c26b; margin: 4px 0; }
+.sg-plan__approve { display: grid; gap: 4px; margin: 8px 0; }
+.sg-plan pre { white-space: pre-wrap; font-size: 11px; max-height: 200px; overflow: auto; }

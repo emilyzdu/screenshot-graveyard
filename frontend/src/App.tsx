@@ -1,4 +1,5 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
+import { completeConnectionFromUrl } from './api/tools';
 import './App.css';
 import Graveyard from './Graveyard';
 import HealthStatus from './HealthStatus';
@@ -14,6 +15,10 @@ const DemoApp = lazy(() => import('./demo/DemoApp'));
 const PixelWorld = lazy(() => import('./world/PixelWorld'));
 
 function App() {
+  useEffect(() => {
+    // Returning from a hosted app connection: finish it with the single-use attempt.
+    if (!isDemoMode()) void completeConnectionFromUrl();
+  }, []);
   if (new URLSearchParams(window.location.search).get('view') === 'world') {
     return (
       <Suspense fallback={null}>

@@ -293,7 +293,7 @@ def test_p1_3_alembic_accepts_percent_encoded_urls(tmp_path):
     assert "invalid interpolation" not in r.stderr
     eng = create_engine(url)
     with eng.connect() as c:
-        assert c.exec_driver_sql("select version_num from alembic_version").scalar() == "e7c2a9b00001"
+        assert c.exec_driver_sql("select version_num from alembic_version").scalar() == "f8d3c0a50001"
     eng.dispose()
 
 

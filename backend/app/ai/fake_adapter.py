@@ -174,6 +174,45 @@ class FakeAIAdapter:
             references=references,
         )
 
+    def plan_actions(self, images, tools):
+        """Return a clearly SIMULATED action plan (external tools, fake mode).
+
+        The Fake never reads the image, so it cannot infer intent: it picks the
+        first offered tool by a fixed rule (Notion, then Gmail, then Calendar)
+        and fills only placeholder text. Calendar values stay missing.
+        """
+        from app.ai.action_plan import (
+            TOOL_CALENDAR,
+            TOOL_GMAIL,
+            TOOL_NOTION,
+            GmailDraftArgs,
+            NotionPageArgs,
+            PlannedAction,
+            PlannerOutput,
+        )
+
+        self._raise_if_timeout()
+        references = [screenshot_id for screenshot_id, _bytes, _mime in images]
+        if self.mode is FakeAIAdapterMode.INVALID:
+            return {"decision": "act", "rationale": "", "actions": [{"tool": "COMPOSIO_REMOTE_BASH_TOOL"}],
+                    "references": references}
+        offered = {t.slug for t in tools}
+        notice = "Simulated plan from the Fake AI. It did not read your screenshot; the tool was picked by a fixed rule."
+        if self.mode is FakeAIAdapterMode.UNCERTAIN or not offered:
+            return PlannerOutput(decision="needs_clarification", rationale=notice,
+                                 clarification_question="What would you like done with this screenshot?",
+                                 references=references)
+        if TOOL_NOTION in offered:
+            action = PlannedAction(tool=TOOL_NOTION, rationale=notice, confidence=0.0,
+                                   notion=NotionPageArgs(title="Simulated page (Fake AI)", markdown=_FAKE_EVENT_NOTICE))
+        elif TOOL_GMAIL in offered:
+            action = PlannedAction(tool=TOOL_GMAIL, rationale=notice, confidence=0.0,
+                                   gmail=GmailDraftArgs(subject="Simulated draft (Fake AI)", body=_FAKE_EVENT_NOTICE))
+        else:
+            action = PlannedAction(tool=TOOL_CALENDAR, rationale=notice, confidence=0.0,
+                                   calendar=self.event_draft(images))
+        return PlannerOutput(decision="act", rationale=notice, actions=[action], references=references)
+
     @staticmethod
     def _marker(instructions: str | None) -> str:
         """Deterministic, honest evidence that instructions were received."""

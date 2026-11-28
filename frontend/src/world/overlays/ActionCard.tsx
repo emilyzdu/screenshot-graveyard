@@ -7,6 +7,7 @@ import { useProviderStatus } from '../../ai/PrivacyNotice';
 import { RevivePanel } from '../../shell/RevivePanel';
 import { MakeNotesDraft } from '../../shell/MakeNotesDraft';
 import { CalendarDraft } from '../../shell/CalendarDraft';
+import { ActionPlanPanel } from '../../shell/ActionPlanPanel';
 import type { GhostView } from '../model/ghostView';
 import { PrototypeTag } from './OverlayHost';
 
@@ -69,6 +70,7 @@ function LiveCard({ ghost, shot, initialChoice, onChanged }: { ghost: GhostView;
       )}
       <MakeNotesDraft key={`notes-${shot.screenshotId}`} screenshot={shot} providerMode={provider.mode} canStart={choice === 'make_notes'} />
       <CalendarDraft key={`calendar-${shot.screenshotId}`} screenshot={shot} providerMode={provider.mode} canStart={choice === 'add_calendar'} />
+      <ActionPlanPanel key={`plan-${shot.screenshotId}`} screenshotId={shot.screenshotId} providerMode={provider.mode} />
     </div>
   );
 }

@@ -304,6 +304,10 @@ AI_EVENT_DRAFT_MAX_OUTPUT_TOKENS: int = _positive_int(
     os.environ.get("AI_EVENT_DRAFT_MAX_OUTPUT_TOKENS", "1200"),
     setting="AI_EVENT_DRAFT_MAX_OUTPUT_TOKENS",
 )
+AI_ACTION_PLAN_MAX_OUTPUT_TOKENS: int = _positive_int(
+    os.environ.get("AI_ACTION_PLAN_MAX_OUTPUT_TOKENS", "2500"),
+    setting="AI_ACTION_PLAN_MAX_OUTPUT_TOKENS",
+)
 # Optional, only for reasoning models (e.g. ``gpt-6-luna``). Unset means the
 # ``reasoning`` parameter is not sent at all, which non-reasoning models such as
 # the default ``gpt-4.1-mini`` require. ``none`` keeps every output token for
@@ -317,6 +321,66 @@ AI_PROVIDER_MAX_RETRIES: int = int(os.environ.get("AI_PROVIDER_MAX_RETRIES", "0"
 if AI_PROVIDER_MAX_RETRIES != 0:
     raise RuntimeError("AI_PROVIDER_MAX_RETRIES must be 0; automatic retries are disabled")
 
+# ---- External tools via Composio (agentic tool execution) ----
+# ``off`` (default): no external tool is offered, planned or executed.
+# ``fake``: a deterministic, network-free transport. Connections and executions
+#   are SIMULATED and labelled as such; nothing reaches any external account.
+# ``composio``: Composio REST v3.1 with a backend-only COMPOSIO_API_KEY. Even
+#   then, external writes stay refused unless COMPOSIO_ALLOW_LIVE_WRITES=1.
+EXTERNAL_TOOLS_MODE: str = os.environ.get("EXTERNAL_TOOLS_MODE", "off").strip().lower()
+if EXTERNAL_TOOLS_MODE not in {"off", "fake", "composio"}:
+    raise RuntimeError("EXTERNAL_TOOLS_MODE must be 'off', 'fake' or 'composio'")
+# Server-side only. Never sent to the browser, the AI model, or a log line.
+COMPOSIO_API_KEY: str | None = os.environ.get("COMPOSIO_API_KEY")
+COMPOSIO_BASE_URL: str = os.environ.get("COMPOSIO_BASE_URL", "https://backend.composio.dev").strip().rstrip("/")
+# Where Composio's hosted Connect Link sends the user back after authorizing.
+# Any query parameters Composio appends are ignored: status is re-read server-side.
+COMPOSIO_CALLBACK_URL: str | None = (os.environ.get("COMPOSIO_CALLBACK_URL") or "").strip() or None
+# One auth config per toolkit (created in the Composio dashboard; it fixes the
+# OAuth app and the scopes). A toolkit without one is shown as not configured.
+COMPOSIO_AUTH_CONFIGS: dict[str, str] = {
+    toolkit: value
+    for toolkit, value in (
+        ("googlecalendar", (os.environ.get("COMPOSIO_AUTH_CONFIG_GOOGLECALENDAR") or "").strip()),
+        ("notion", (os.environ.get("COMPOSIO_AUTH_CONFIG_NOTION") or "").strip()),
+        ("gmail", (os.environ.get("COMPOSIO_AUTH_CONFIG_GMAIL") or "").strip()),
+    )
+    if value
+}
+# Optional toolkit version pins (e.g. "20251201_00"). Unset: the version Composio
+# reports as current is resolved once, recorded in the plan, and pinned for its
+# execution, so an approved plan never runs against a different tool version.
+COMPOSIO_TOOLKIT_VERSIONS: dict[str, str] = {
+    toolkit: value
+    for toolkit, value in (
+        ("googlecalendar", (os.environ.get("COMPOSIO_TOOLKIT_VERSION_GOOGLECALENDAR") or "").strip()),
+        ("notion", (os.environ.get("COMPOSIO_TOOLKIT_VERSION_NOTION") or "").strip()),
+        ("gmail", (os.environ.get("COMPOSIO_TOOLKIT_VERSION_GMAIL") or "").strip()),
+    )
+    if value
+}
+COMPOSIO_TIMEOUT_SECONDS: float = _positive_finite_float(
+    os.environ.get("COMPOSIO_TIMEOUT_SECONDS", "20"), setting="COMPOSIO_TIMEOUT_SECONDS"
+)
+# Real external writes need this explicit second switch (default off). Until a
+# live write was authorized and verified, ``composio`` mode can connect accounts
+# and read tool schemas, but every execution is refused before dispatch.
+COMPOSIO_ALLOW_LIVE_WRITES: bool = os.environ.get("COMPOSIO_ALLOW_LIVE_WRITES", "0") == "1"
+# Hosted connections bind completion to the initiating workspace (single-use,
+# expiring attempt), but cannot prove WHICH provider identity was authorized.
+# Until that is resolved, production refuses hosted connections unless this is
+# set; use controlled local test accounts in development.
+COMPOSIO_PUBLIC_CONNECT: bool = os.environ.get("COMPOSIO_PUBLIC_CONNECT", "0") == "1"
+# Tool slugs an operator has verified with a recorded, authorized live write.
+# Informational only: the UI never calls a tool "live" unless it is listed here.
+COMPOSIO_LIVE_VERIFIED_TOOLS: frozenset[str] = frozenset(
+    s.strip() for s in (os.environ.get("COMPOSIO_LIVE_VERIFIED_TOOLS") or "").split(",") if s.strip()
+)
+# An execution reserved but never settled (the process died mid-request) is
+# reported as an UNKNOWN outcome after this window. It is never retried.
+TOOL_EXECUTION_STALE_SECONDS: float = _positive_finite_float(
+    os.environ.get("TOOL_EXECUTION_STALE_SECONDS", "300"), setting="TOOL_EXECUTION_STALE_SECONDS"
+)
 # BackgroundTasks are intentionally non-durable.  Startup and the managed
 # lifespan loop recover only operations older than this conservative window;
 # the normal adapter timeout is much shorter.  Values are server-side and

@@ -120,7 +120,7 @@ export default function PixelWorld() {
           ) : opened.kind === 'crypt' ? (
             <CryptOverlay archived={archived} synthetic={synthetic} onChanged={gallery.refresh} />
           ) : opened.kind === 'portal' ? (
-            <PortalInfo />
+            <PortalInfo synthetic={synthetic} />
           ) : <SettingsOverlay synthetic={synthetic} />}
         </OverlayHost>
       )}

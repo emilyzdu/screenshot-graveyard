@@ -288,7 +288,7 @@ def test_migration_counts_existing_content_and_deletes_nothing(tmp_path, monkeyp
                            "values (:i, 1, :s, :b, 'image/png', 'x', CURRENT_TIMESTAMP)"), {"i": i, "s": str(i) * 64, "b": size})
     command.upgrade(cfg, "head")
     with e.connect() as c:
-        assert c.execute(text("select version_num from alembic_version")).scalar() == "e7c2a9b00001"
+        assert c.execute(text("select version_num from alembic_version")).scalar() == "f8d3c0a50001"
         assert c.execute(text("select value from global_counter where name = 'storage_bytes'")).scalar() == 150
     command.downgrade(cfg, "d6b1a7e00001")
     with e.connect() as c:

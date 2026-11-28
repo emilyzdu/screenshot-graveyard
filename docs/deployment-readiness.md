@@ -134,6 +134,15 @@ production defaults 30 / 25), `AI_PROVIDER`, `OPENAI_MODEL`, `OPENAI_API_KEY`
 
 ## 4. Future OAuth prerequisites (Requirement 25)
 
+> Superseded in part by AMD-2 (2026-11-28): connections now use Composio's hosted
+> Connect Link and auth configs, and Composio holds the OAuth tokens. New
+> variables (names only): `EXTERNAL_TOOLS_MODE`, `COMPOSIO_API_KEY` (secret),
+> `COMPOSIO_CALLBACK_URL`, `COMPOSIO_AUTH_CONFIG_GOOGLECALENDAR|NOTION|GMAIL`,
+> `COMPOSIO_ALLOW_LIVE_WRITES` and `COMPOSIO_PUBLIC_CONNECT` (both must stay off
+> for a public deployment until the blockers in `docs/composio-integration.md`
+> are closed). The items below still apply to the OAuth apps behind the auth
+> configs (redirect domain, Google consent screen and narrow scopes).
+
 - The final HTTPS domain (R10) is registered as the redirect URI.
 - Google Cloud project, consent screen, and the `calendar.events` scope. Use test users
   for judging if verification is slow (decision T2).

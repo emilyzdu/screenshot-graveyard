@@ -185,6 +185,10 @@ def create_app(
     # stays network-free and has no credential requirement.
     from app.ai.provider import configure_ai_adapter
     configure_ai_adapter()
+    # External tools (Composio): off by default; composio mode fails closed
+    # without a backend API key. Never falls back between modes.
+    from app.tools.provider import configure_tool_transport
+    configure_tool_transport()
 
     recovery_session_factory = workspace_session_factory or SessionLocal
     stale_after_seconds = (
@@ -290,6 +294,10 @@ def create_app(
     application.include_router(build_study_selection_router())
     from app.routers.auto_process import build_auto_process_router
     application.include_router(build_auto_process_router())
+    from app.routers.integrations import build_integrations_router
+    application.include_router(build_integrations_router())
+    from app.routers.action_plans import build_action_plans_router
+    application.include_router(build_action_plans_router())
 
     # Explicit guard: any unmatched /api path returns a JSON API error, never
     # the SPA. Registered before the SPA catch-all so it takes precedence for

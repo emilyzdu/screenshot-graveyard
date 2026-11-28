@@ -214,7 +214,7 @@ previously recorded here ("Open conflict: external destination for a future
 calendar delivery"): ASSUMPTION A6 and Requirements 16.3 and 17.6 named OneNote
 (Google Docs fallback) as the single destination; they now point here. Delivery
 is a separate workstream from AI preparation (`docs/pixel-world-prd.md` §B-15
-and §M Phase D). Nothing in this requirement is implemented yet.
+and §M Phase D). Amended by AMD-2 below; see the AMD-2 status for what is implemented.
 
 **User Story:** As a solo user, I want to send a draft I approved to my own
 Google Calendar (and later my Notion), so that a screenshot becomes a real event
@@ -270,6 +270,54 @@ never claims success it cannot prove.
    25.3–25.8 against a fake destination, and at least one manual live delivery
    to a test account SHALL be recorded before a destination is marked
    available.
+
+### Amendment AMD-2: Composio as the external tool layer (2026-11-28, product owner decision)
+
+Additive; the clauses of Requirement 25 above remain and are refined here.
+Implementation: `docs/composio-integration.md`.
+
+1. **AI-selected tools (refines Requirement 20 and 25.2).** The AI MAY propose
+   an action plan for one consented screenshot: `act` (1 to 3 actions),
+   `no_action`, or `needs_clarification` (one question), each action with a
+   tool from a bounded server catalog, a short user-facing rationale, a
+   confidence and validated arguments. A plan is a proposal and an
+   append-only versioned artifact; planning SHALL NOT perform an external write.
+2. **Destinations (refines 25.1).** The catalog is exactly
+   `GOOGLECALENDAR_CREATE_EVENT`, `NOTION_CREATE_NOTION_PAGE` and
+   `GMAIL_CREATE_EMAIL_DRAFT` (Gmail drafts only; nothing is ever sent). This
+   supersedes the P2 exclusion of destinations beyond Google Calendar and
+   Notion for Gmail drafts only. No meta, proxy, read, update, delete or send
+   tool SHALL be offered or executed.
+3. **Approval and authorization (refines 25.3).** Execution SHALL require an
+   approval of the exact current plan version (content SHA-256) and a separate
+   explicit Run per action; arguments SHALL be rebuilt server-side from the
+   approved content.
+4. **Account binding (replaces the token-custody part of 25.4).** Connections
+   use Composio's hosted Connect Link and auth configs; OAuth tokens are held
+   by Composio, not by this server. Each workspace has its own provider user
+   id. Completion SHALL require a single-use, expiring attempt presented by the
+   initiating workspace plus a provider check of owner, toolkit and status.
+   Public production connections SHALL stay disabled until provider identity
+   can be confirmed.
+5. **Idempotency (refines 25.5).** A stable delivery identity independent of
+   plan artifacts SHALL block duplicate and unresolved writes across replans,
+   revisions, equivalent edits and reconnects. Any outcome without proof of
+   non-dispatch is unknown and SHALL NOT be retried automatically. Google
+   Calendar does not accept a client event id through this tool; a private
+   delivery marker is used instead and SHALL be present for a verified receipt.
+6. **Truthful states (refines 25.6 and 25.7).** Execution states are
+   `reserved`, `cancelled`, `executing`, `succeeded` (Calendar verified by
+   marker; Notion/Gmail receipts labelled unverified), `failed` (never sent)
+   and `unknown`. Simulated (fake) results SHALL be labelled simulated.
+7. **Live verification (25.9) is pending.** Real writes stay disabled
+   (`COMPOSIO_ALLOW_LIVE_WRITES` off) until authorized, recorded test-account
+   verification.
+
+**AMD-2 status (2026-11-28):** implemented and covered by automated tests
+against a fake transport; independently reviewed and approved for controlled
+local live verification with dedicated test accounts; live verification not
+yet run; not deployed. Limitations and public-production blockers are listed
+in `docs/composio-integration.md`.
 
 ## Additional tasks
 
@@ -364,6 +412,7 @@ Wave 5 (A.5). A.7 starts only after the PRD is re-supplied and A.4 is stable.
 | A.9 review, edit and version history | Implemented in Batch 5A |
 | A.10 version-specific approval and approval ledger | Implemented in Batch 5B |
 | A.11 real vision AI behind a consent-dispatch boundary | Implemented in Batch 6A, pending review; live provider not verified without a key |
+| AMD-2 AI tool planning (A.7) and Composio execution (Requirement 25) | Implemented, reviewed for local live verification; live verification not run; public connections and live writes disabled |
 
 ## Addendum: updates after reading the real PRD v2.0
 

@@ -382,6 +382,18 @@ class VaultService:
         """
         shot = self._owned_screenshot_or_raise(screenshot_id)
         try:
+            # External tools: in the same transaction, under the workspace lock
+            # that the dispatch boundary also takes, cancel every unsent
+            # ("reserved") external write for this screenshot. Rows already
+            # past the dispatch linearization point ("executing" or settled)
+            # are untouched. Cancelled is terminal: a restore never revives it.
+            if self._repo.lock_workspace() is None:
+                self._session.rollback()
+                raise ScreenshotNotFoundError("screenshot not found")
+            from app.services.tool_execution_service import cancel_reserved_locked  # avoids an import cycle
+
+            cancel_reserved_locked(self._session, self._repo.workspace_id, screenshot_id=screenshot_id,
+                                   detail="Cancelled before sending: the screenshot was moved to The Crypt.")
             if shot.state != self._ARCHIVED:
                 self._repo.set_screenshot_state(screenshot_id, self._ARCHIVED)
             self._session.commit()
