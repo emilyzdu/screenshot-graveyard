@@ -53,6 +53,8 @@ Tables: `workspace`, `content_blob` (per-workspace dedup by SHA-256), `screensho
 `source_reference` (provenance attached to the artifact), `consent_record`,
 `operation` (status: pending/successful/failed/uncertain). Every non-`workspace`
 table carries `workspace_id` FK + index.
+Exception: `global_counter` (deployment-wide AI-request and storage counts only,
+no workspace data; accessed only via `global_usage_service`).
 
 ## Async model
 

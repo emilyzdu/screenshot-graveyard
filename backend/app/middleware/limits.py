@@ -57,6 +57,45 @@ _TOO_LARGE = {"error": {"code": "payload_too_large", "message": "Payload Too Lar
 _RATE_LIMITED = {"error": {"code": "rate_limited", "message": "Too Many Requests"}}
 
 
+def _in_networks(addr: str, networks) -> bool:
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return any(ip in net for net in networks)
+
+
+def client_ip(request: Request, networks=None) -> str:
+    """The client address used for per-IP rate limiting (deployment readiness R4).
+
+    By default this is the direct peer address; forwarding headers are client-
+    settable and are ignored. ONLY when the peer is inside a configured trusted
+    proxy network (``TRUSTED_PROXY_CIDRS``) is ``X-Forwarded-For`` consulted, and
+    then only its right-most entry that is not itself a trusted proxy: entries
+    to its left were supplied by the client and could be forged. A malformed
+    header, or one made only of trusted proxies, falls back to the peer address.
+    ``X-Real-IP`` and ``Forwarded`` are never used.
+    """
+    import ipaddress
+
+    nets = config.TRUSTED_PROXY_NETWORKS if networks is None else networks
+    client = request.client
+    peer = client.host if client is not None else "unknown"
+    if not nets or not _in_networks(peer, nets):
+        return peer
+    hops = [h.strip() for v in request.headers.getlist("x-forwarded-for") for h in v.split(",")]
+    for hop in reversed(hops):
+        try:
+            ipaddress.ip_address(hop)
+        except ValueError:
+            return peer  # malformed chain: do not guess
+        if not _in_networks(hop, nets):
+            return hop
+    return peer
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, limiter: TokenBucketRateLimiter | None = None):
         super().__init__(app)
@@ -70,12 +109,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return self._limiter
 
     def _client_key(self, request: Request) -> str:
-        # Use the direct peer address only. We deliberately do NOT trust
-        # X-Forwarded-For / X-Real-IP here, since those are client-settable and
-        # could be spoofed to evade or poison the limiter. (A trusted reverse
-        # proxy integration would require explicit, configured proxy handling.)
-        client = request.client
-        return client.host if client is not None else "unknown"
+        return client_ip(request)
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path

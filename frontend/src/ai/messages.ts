@@ -2,6 +2,21 @@ import { isAIAnalysisOrigin, type ResultProvider } from '../api/analysisOrigin';
 import type { ApiFailure, OperationStatus, ProviderMode } from '../api/ai';
 
 /** Plain-language text for a failed AI request (never shows raw server detail). */
+/**
+ * Deployment foundation: a 429 has three different causes. Each gets its own
+ * truthful text (the server's error code decides; the status alone does not).
+ * `null` for the per-workspace quota (callers keep their existing wording) and
+ * for anything that is not a 429.
+ */
+export function describeLimitFailure(f: ApiFailure, nothing: string): string | null {
+  if (f.status !== 429) return null;
+  if (f.code === 'ai_budget_reached') {
+    return `The app\u2019s daily AI limit has been reached. ${nothing} Please try again tomorrow, or explore the demo (add ?demo=1 to the address).`;
+  }
+  if (f.code === 'rate_limited') return `Too many requests in a short time. ${nothing} Please wait a moment and try again.`;
+  return null;
+}
+
 export function describeRequestFailure(f: ApiFailure): string {
   switch (f.status) {
     case 400:
@@ -13,7 +28,8 @@ export function describeRequestFailure(f: ApiFailure): string {
     case 404:
       return 'That screenshot could not be found in your workspace.';
     case 429:
-      return 'You have used up this workspace\u2019s AI request allowance. Nothing was processed.';
+      return describeLimitFailure(f, 'Nothing was processed.') ??
+        'You have used up this workspace\u2019s AI request allowance. Nothing was processed.';
     case 503:
       return 'The service is temporarily unavailable. Please try again shortly.';
     case 0:

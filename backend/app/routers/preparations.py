@@ -199,9 +199,8 @@ def build_preparations_router() -> APIRouter:
             except ConsentRequiredError:
                 return JSONResponse(status_code=403, content=_error_body(
                     "consent_required", "AI processing consent required"))
-            except OperationQuotaExceededError:
-                return JSONResponse(status_code=429, content=_error_body(
-                    "quota_exceeded", "AI operation quota exceeded"))
+            except OperationQuotaExceededError as exc:
+                return JSONResponse(status_code=429, content=_error_body(exc.code, exc.public_message))
             except (PreparationUnavailableError, OperationServiceUnavailableError, ConsentServiceUnavailableError):
                 return JSONResponse(status_code=503, content=_error_body(
                     "service_unavailable", "Service temporarily unavailable"))

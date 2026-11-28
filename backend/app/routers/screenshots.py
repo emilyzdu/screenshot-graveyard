@@ -39,6 +39,7 @@ from app.services.analysis_service import AnalysisService, AnalysisUnavailableEr
 from app.services.vault_service import (
     ScreenshotNotFoundError,
     ScreenshotInfo,
+    StorageLimitError,
     VaultService,
     VaultServiceError,
 )
@@ -148,6 +149,15 @@ def build_screenshots_router() -> APIRouter:
                             filename=display_name,
                             status="rejected",
                             error="Workspace screenshot quota exceeded",
+                        )
+                    )
+                except StorageLimitError:
+                    # Deployment-wide storage limit (all workspaces). Generic text.
+                    results.append(
+                        PerFileResult(
+                            filename=display_name,
+                            status="rejected",
+                            error="Storage is full right now, so this file was not saved. Please try again later.",
                         )
                     )
                 except VaultServiceError:

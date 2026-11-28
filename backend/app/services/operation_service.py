@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.db import models
 from app import config
 from app.db.repository import CrossWorkspaceError, QuotaExceededError, WorkspaceRepository
+from app.services.global_usage_service import GlobalAIBudgetExceededError, GlobalUsageService
 
 
 # event_draft (Batch 4B) is a metered AI operation like the others.
@@ -88,6 +89,23 @@ class OperationTransitionError(OperationServiceError):
 class OperationQuotaExceededError(OperationServiceError):
     """The trusted workspace has exhausted its bounded AI-call allowance."""
 
+    code = "quota_exceeded"
+    public_message = "AI operation quota exceeded"
+
+
+class OperationGlobalBudgetExceededError(OperationQuotaExceededError):
+    """The deployment-wide daily AI-request quota is used up (all workspaces).
+
+    An application-side request quota, not a verified financial cap. Nothing
+    was created or sent.
+    """
+
+    code = "ai_budget_reached"
+    public_message = (
+        "The daily AI limit for this app has been reached. Nothing was sent. "
+        "Please try again tomorrow, or explore the demo."
+    )
+
 
 @dataclass(frozen=True)
 class OperationState:
@@ -119,8 +137,16 @@ class OperationService:
             artifact_id=operation.artifact_id,
         )
 
-    def create_pending(self, kind: str) -> OperationState:
-        """Persist a new accepted AI operation in its initial ``pending`` state."""
+    def create_pending(self, kind: str, *, metered: bool = True) -> OperationState:
+        """Persist a new accepted AI operation in its initial ``pending`` state.
+
+        ``metered`` (default) reserves one unit of the deployment-wide daily AI
+        quota: callers pass it only after the request was validated and will be
+        executed (sources owned, consent granted, a worker scheduled). The
+        source-less Task 2.4 acceptance scaffold (``POST /api/operations``)
+        creates an UNMETERED placeholder: it can never touch the global quota.
+        Every operation still counts toward its own workspace's quota.
+        """
         if kind not in AI_OPERATION_KINDS:
             raise ValueError("invalid operation kind")
         try:
@@ -129,11 +155,18 @@ class OperationService:
             if self._repo.lock_workspace() is None:
                 raise OperationServiceUnavailableError("operation service unavailable")
             self._repo.ensure_ai_quota(config.MAX_AI_CALLS_PER_WORKSPACE)
+            # Deployment-wide daily quota, reserved in this same transaction
+            # (a reused operation never reaches this line, so it costs nothing).
+            if metered:
+                GlobalUsageService(self._session).reserve_ai_call(config.MAX_AI_CALLS_PER_DAY)
             operation = self._repo.create_operation(kind=kind, status="pending")
             self._session.commit()
         except QuotaExceededError as exc:
             self._session.rollback()
             raise OperationQuotaExceededError("AI operation quota exceeded") from exc
+        except GlobalAIBudgetExceededError as exc:
+            self._session.rollback()
+            raise OperationGlobalBudgetExceededError("global AI request quota reached") from exc
         except OperationServiceUnavailableError:
             self._session.rollback()
             raise
@@ -183,6 +216,9 @@ class OperationService:
             if before_create is not None:
                 before_create()
             self._repo.ensure_ai_quota(config.MAX_AI_CALLS_PER_WORKSPACE)
+            # Deployment-wide daily quota, reserved in this same transaction
+            # (a reused operation never reaches this line, so it costs nothing).
+            GlobalUsageService(self._session).reserve_ai_call(config.MAX_AI_CALLS_PER_DAY)
             operation = self._repo.create_operation(
                 kind=kind, status="pending", idempotency_key=idempotency_key
             )
@@ -190,6 +226,9 @@ class OperationService:
         except QuotaExceededError as exc:
             self._session.rollback()
             raise OperationQuotaExceededError("AI operation quota exceeded") from exc
+        except GlobalAIBudgetExceededError as exc:
+            self._session.rollback()
+            raise OperationGlobalBudgetExceededError("global AI request quota reached") from exc
         except SQLAlchemyError as exc:
             self._session.rollback()
             raise OperationServiceUnavailableError("operation service unavailable") from exc

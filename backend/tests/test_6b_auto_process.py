@@ -540,7 +540,7 @@ def test_migration_adds_an_opt_out_default_and_keeps_existing_workspaces(tmp_pat
     e = create_engine(url)
     with e.begin() as c:
         c.execute(text("insert into workspace (id, token_hash, created_at) values (1, :h, CURRENT_TIMESTAMP)"), {"h": "e" * 64})
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "d6b1a7e00001")  # this migration, not whatever is head later
     with e.connect() as c:
         assert c.execute(text("select version_num from alembic_version")).scalar() == "d6b1a7e00001"
         assert c.execute(text("select token_hash, auto_prepare from workspace")).one() == ("e" * 64, 0)

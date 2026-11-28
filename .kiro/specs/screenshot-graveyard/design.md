@@ -387,7 +387,7 @@ erDiagram
 - **`consent_record`** `(id, workspace_id, screenshot_id, granted, granted_at, UNIQUE(workspace_id, screenshot_id))`.
 - **`operation`** `(id, workspace_id, kind, status ∈ {pending, successful, failed, uncertain}, artifact_id NULL, idempotency_key NULL [P1], error_detail NULL, created_at, updated_at)`.
 
-**Every non-`workspace` table carries `workspace_id` as a FK and is indexed on `workspace_id`.** All queries and file reads are workspace-scoped (Req 12.6, 9.9).
+**Every non-`workspace` table carries `workspace_id` as a FK and is indexed on `workspace_id`.** All queries and file reads are workspace-scoped (Req 12.6, 9.9). *Deployment-foundation exception (approved, deployment readiness R5/R8):* the `global_counter` table holds only aggregate, deployment-wide counts (the daily AI-request quota and total stored bytes) and no workspace data; it is read and updated only by `app/services/global_usage_service.py` under a row lock. It is the one table without `workspace_id`, because a per-workspace quota cannot bound a public app where anyone can mint a workspace.
 
 ### `content_json` payload shapes
 

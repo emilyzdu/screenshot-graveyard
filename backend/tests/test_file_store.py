@@ -127,7 +127,7 @@ def test_interrupted_write_cleans_temp_and_publishes_nothing(store, monkeypatch)
     # Force a failure AFTER the temp file is written but BEFORE publish.
     import app.storage.file_store as fs_mod
 
-    def boom(src, dst):
+    def boom(src, dst, **kwargs):  # the write path links via directory fds (kwargs)
         raise RuntimeError("simulated interruption before publish")
 
     monkeypatch.setattr(fs_mod.os, "link", boom)

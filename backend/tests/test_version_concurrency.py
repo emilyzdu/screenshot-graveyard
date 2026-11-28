@@ -877,10 +877,20 @@ def test_analysis_redo_and_edit_under_contention_keep_both_artifacts_in_step(env
                 lambda: redo_analysis(env, env.a, sid, op, adapter, "brief"),
                 lambda: edit_analysis(env, env.a, sid),
             )
-        assert redo_out.operation.status == "successful"
         class_o, epi_o = _pair_origins(env, cid, eid)
         assert class_o == epi_o                                    # same order on BOTH artifacts
-        assert sorted(o for _n, o in class_o[1:]) == ["ai_redo", "manual_edit"]
+        # Two valid commit orders; which one wins depends on scheduling, not on a bug.
+        if redo_out.operation.status == "successful":
+            # The redo committed first; the manual edit then lands on top of it.
+            assert class_o == [(1, "ai_generate"), (2, "ai_redo"), (3, "manual_edit")]
+        else:
+            # The manual edit committed first; the redo's persistence guard rejects
+            # the now-stale AI result, so nothing from the AI is persisted.
+            assert redo_out.operation.status == "failed"
+            assert (redo_out.operation.error_detail or "").startswith("Superseded")
+            assert class_o == [(1, "ai_generate"), (2, "manual_edit")]
+        # Either way the user's manual edit is never discarded and is current.
+        assert class_o[-1][1] == "manual_edit"
         assert_valid_pointer(env, cid)
         assert_valid_pointer(env, eid)
         assert len(adapter.class_calls) == 1

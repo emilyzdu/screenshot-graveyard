@@ -26,6 +26,8 @@ Key safety properties (criteria 11-15):
 
 from __future__ import annotations
 
+import threading
+
 from dataclasses import dataclass
 
 from sqlalchemy.exc import IntegrityError
@@ -34,6 +36,7 @@ from sqlalchemy.orm import Session
 from app import config
 from app.db import models
 from app.db.repository import QuotaExceededError, WorkspaceRepository
+from app.services.global_usage_service import GlobalStorageLimitError, GlobalUsageService
 from app.storage.file_store import (  # ONLY importer of the file store
     FileStore,
     IntegrityError as FileStoreIntegrityError,
@@ -100,6 +103,34 @@ class ScreenshotNotFoundError(Exception):
     """
 
 
+# Serializes "measure free space, reserve capacity, write bytes" across the
+# request threads of this process. The deployment runs exactly one worker
+# (docs/deployment-readiness.md R1); the byte cap itself is enforced in the
+# database and would hold across processes, the free-space floor would not.
+_ALLOCATION_LOCK = threading.Lock()
+
+
+class StorageLimitError(Exception):
+    """Deployment-wide storage is full (global bytes limit or volume free space).
+
+    Generic message only. Nothing new is stored; existing files are untouched.
+    """
+
+
+def _free_bytes(path: str) -> int:
+    """Free space on the volume holding ``path`` (nearest existing ancestor)."""
+    import os
+    import shutil
+
+    probe = os.path.abspath(path)
+    while not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    return shutil.disk_usage(probe).free
+
+
 class VaultServiceError(Exception):
     """Base error for vault operations (generic, no private data in messages)."""
 
@@ -148,15 +179,35 @@ class VaultService:
             data, filename=filename, declared_mime=declared_mime
         )
 
-        # 2) Publish bytes write-once BEFORE committing metadata. Idempotent by
-        #    content hash; verifies/keeps existing bytes without overwrite.
-        try:
-            storage_path = self._store.write_once(
-                self._workspace_id, validated.sha256, validated.data
-            )
-        except Exception as exc:  # FileStore integrity/OS error
-            # Nothing persisted; surface a generic error.
-            raise VaultServiceError("failed to store original bytes") from exc
+        # 1b) Early, NON-authoritative limit checks BEFORE any byte is written:
+        #     bytes are published before the metadata transaction, so a limit
+        #     enforced only there would still let a refused upload write files.
+        #     The authoritative checks run again under the lock in `_persist`.
+        self._precheck_limits(validated)
+
+        # 2) Reserve capacity, then publish bytes write-once BEFORE committing
+        #    metadata. The process-wide allocation lock (one worker per
+        #    deployment) makes "measure free space, reserve, write" one step, so
+        #    concurrent uploads cannot jointly pass the free-space floor. The
+        #    reservation is its own committed transaction under the counter row
+        #    lock, so the byte cap holds across workspaces and restarts.
+        # The SHARED allocation guard (a cross-process file lock) keeps startup
+        # recovery from running while this upload is between reserving and
+        # writing.
+        with _ALLOCATION_LOCK, self._store.allocation_guard():
+            # Already-published bytes (even without a metadata row, e.g. after a
+            # failed transaction) need no new capacity.
+            if not self._store.is_published(self._workspace_id, validated.sha256):
+                self._reserve_capacity(validated.byte_size)
+            try:
+                storage_path = self._store.write_once(
+                    self._workspace_id, validated.sha256, validated.data
+                )
+            except Exception as exc:  # FileStore integrity/OS error
+                # Nothing persisted; surface a generic error. A reservation made
+                # above stays counted (a conservative over-count) until the next
+                # startup recovery measures the disk.
+                raise VaultServiceError("failed to store original bytes") from exc
 
         # 3) Persist metadata in ONE workspace-scoped transaction. Success is
         #    reported only after commit (criterion 13).
@@ -164,7 +215,7 @@ class VaultService:
             result = self._persist(validated, storage_path, filename=filename)
             self._session.commit()
             return result
-        except QuotaExceededError:
+        except (QuotaExceededError, StorageLimitError):
             self._session.rollback()
             # The published blob may now be an unreferenced orphan. It is NOT
             # deleted (write-once, no delete); it is harmless and reused by a
@@ -176,11 +227,55 @@ class VaultService:
 
     # --------------------------------------------------------------- internals
 
+    def _precheck_limits(self, validated) -> None:
+        """Refuse BEFORE writing bytes when a limit is already reached.
+
+        Reads without locks: concurrent uploads near a limit may each pass here,
+        so the authoritative checks are repeated under the lock in `_persist`.
+        The worst case is a few unreferenced (never deleted, write-once) blobs.
+        Content this workspace already stores adds no bytes and is not refused
+        by the storage checks.
+        """
+        if self._repo.count_screenshots() + 1 > self._quota:
+            raise QuotaExceededError("screenshot", self._quota)
+        if self._repo.get_content_blob_by_sha256(validated.sha256) is not None:
+            return
+        if self._store.is_published(self._workspace_id, validated.sha256):
+            return  # published earlier without a metadata row: no new bytes
+        usage = GlobalUsageService(self._session)
+        if usage.storage_used() + validated.byte_size > config.MAX_TOTAL_STORAGE_BYTES:
+            raise StorageLimitError("storage limit reached")
+        if _free_bytes(self._store_root()) - validated.byte_size < config.STORAGE_MIN_FREE_BYTES:
+            raise StorageLimitError("storage volume nearly full")
+
+    def _reserve_capacity(self, nbytes: int) -> None:
+        """Authoritative capacity reservation, committed on its own (see upload)."""
+        try:
+            GlobalUsageService(self._session).reserve_storage(
+                nbytes,
+                config.MAX_TOTAL_STORAGE_BYTES,
+                free_bytes=_free_bytes(self._store_root()),
+                min_free=config.STORAGE_MIN_FREE_BYTES,
+            )
+            self._session.commit()
+        except GlobalStorageLimitError as exc:
+            self._session.rollback()
+            raise StorageLimitError("storage limit reached") from exc
+        except Exception as exc:
+            self._session.rollback()
+            raise VaultServiceError("could not reserve storage") from exc
+
+    def _store_root(self) -> str:
+        return getattr(self._store, "root", None) or config.STORAGE_ROOT
+
     def _persist(self, validated, storage_path: str, *, filename: str | None) -> UploadResult:
         # Lock the workspace row so the quota count+insert is atomic per workspace
         # (Postgres: SELECT ... FOR UPDATE; SQLite: harmless no-op + single writer).
         self._repo.lock_workspace()
 
+        # Stored bytes were already reserved (and counted) before they were
+        # written; nothing is counted here, so a rollback cannot lose track of
+        # bytes that remain on disk.
         blob = self._get_or_create_blob(validated, storage_path)
 
         # Atomic quota enforcement under the workspace lock: count existing

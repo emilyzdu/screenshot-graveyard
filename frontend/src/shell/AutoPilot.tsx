@@ -15,6 +15,7 @@ import { boundedFetch } from '../api/boundedFetch';
 import { Icon } from '../ui/Icon';
 import { Badge, Button } from '../ui/primitives';
 import { LIVE_ACTIONS } from './nextAction';
+import { describeLimitFailure } from '../ai/messages';
 
 export const AUTO_READ_TIMEOUT_MS = 10_000;
 export const AUTO_START_TIMEOUT_MS = 15_000;
@@ -58,6 +59,9 @@ function startFailureText(f: ApiFailure): string {
     case 'automation_off': return 'Automatic processing is turned off for this workspace. Nothing was started.';
     case 'screenshot_archived': return 'Resurrect this screenshot before processing it. Nothing was started.';
     case 'quota_exceeded': return 'This workspace has reached its AI limit. Nothing was started.';
+    case 'ai_budget_reached':
+    case 'rate_limited':
+      return describeLimitFailure(f, 'Nothing was started.') ?? 'This workspace has reached its AI limit. Nothing was started.';
     default: return `The request did not go through (${f.message}). Nothing new was started.`;
   }
 }

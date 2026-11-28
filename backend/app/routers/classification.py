@@ -135,10 +135,10 @@ def build_classification_router() -> APIRouter:
                     status_code=403,
                     content=_error_body("consent_required", "AI processing consent required"),
                 )
-            except OperationQuotaExceededError:
+            except OperationQuotaExceededError as exc:
                 return JSONResponse(
                     status_code=429,
-                    content=_error_body("quota_exceeded", "AI operation quota exceeded"),
+                    content=_error_body(exc.code, exc.public_message),
                 )
             except OperationServiceUnavailableError:
                 return JSONResponse(
