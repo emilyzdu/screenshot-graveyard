@@ -145,10 +145,10 @@ def build_study_notes_router() -> APIRouter:
 
             try:
                 operation = OperationService(session, workspace_id).create_pending("study_note")
-            except OperationQuotaExceededError:
+            except OperationQuotaExceededError as exc:
                 return JSONResponse(
                     status_code=429,
-                    content=_error_body("quota_exceeded", "AI operation quota exceeded"),
+                    content=_error_body(exc.code, exc.public_message),
                 )
             except OperationServiceUnavailableError:
                 return JSONResponse(

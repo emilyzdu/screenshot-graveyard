@@ -176,6 +176,11 @@ def create_app(
         A :class:`fastapi.FastAPI` instance with the API router registered and,
         when ``frontend/dist`` exists, the built SPA served at the same origin.
     """
+    # Deployment foundation: in production, refuse to start on an unsafe or
+    # incomplete environment (database, storage, origins, proxy, global limits).
+    if config.IS_PRODUCTION:
+        from app.production_checks import assert_production_config
+        assert_production_config()
     # Fail closed at startup for real-provider configuration errors.  Fake mode
     # stays network-free and has no credential requirement.
     from app.ai.provider import configure_ai_adapter

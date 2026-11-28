@@ -194,8 +194,8 @@ def build_auto_process_router() -> APIRouter:
                 return _err(409, "automation_off", "Automatic processing is turned off")
             except ConsentRequiredError:
                 return _err(403, "consent_required", "AI processing consent required")
-            except OperationQuotaExceededError:
-                return _err(429, "quota_exceeded", "AI operation quota exceeded")
+            except OperationQuotaExceededError as exc:
+                return _err(429, exc.code, exc.public_message)
             except (AutoProcessUnavailableError, OperationServiceUnavailableError, ConsentServiceUnavailableError):
                 return _err(503, "service_unavailable", "Service temporarily unavailable")
             if run:

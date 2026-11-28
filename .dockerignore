@@ -1,0 +1,64 @@
+# Build-context ALLOWLIST (P1-4). Everything is excluded; only explicit build
+# inputs are re-included, BY FILE TYPE inside each input directory, so stray
+# data (extension-less blobs, images, databases and their -wal/-shm/-journal
+# sidecars, custom storage folders) can never qualify. Sensitive names are
+# excluded again afterwards (the last matching rule wins).
+# Static checks: backend/tests/test_deploy_remediation.py, test_deploy_final.py.
+# Real-daemon check: deploy/verify-build-context.sh (needs Docker).
+*
+
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/index.html
+!frontend/vite.config.ts
+!frontend/tsconfig.json
+!frontend/tsconfig.app.json
+!frontend/tsconfig.node.json
+!frontend/src/**/*.ts
+!frontend/src/**/*.tsx
+!frontend/src/**/*.css
+# Pixel World runtime art (P1-4b): ONLY the game PNGs directly in the world
+# assets folder, plus the manifest the release build checks them against
+# (deploy/verify-world-assets.mjs). `*` never crosses a `/`, so source art in
+# subfolders (_source/) is not re-included; it is also excluded again below.
+!frontend/src/world/assets/*.png
+!frontend/src/world/assets/manifest.json
+!deploy/verify-world-assets.mjs
+!frontend/public/*.svg
+
+!backend/requirements.txt
+!backend/alembic.ini
+!backend/alembic/env.py
+!backend/alembic/script.py.mako
+!backend/alembic/versions/*.py
+!backend/app/**/*.py
+
+!deploy/start.sh
+
+# Never send these, even when an allowed rule matched.
+**/.env
+**/.env.*
+**/*.env
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+**/*.pfx
+**/id_rsa*
+**/id_ed25519*
+**/*secret*
+**/*credential*
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
+**/*-wal
+**/*-shm
+**/*-journal
+**/__pycache__
+**/node_modules
+**/dist
+frontend/src/world/assets/_source
+**/.shots

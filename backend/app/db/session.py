@@ -12,12 +12,14 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import config
+from app.db.url import parse_database_url
 
 
 def make_engine(url: str | None = None) -> Engine:
-    database_url = url or config.DATABASE_URL
+    # Parsed safely: a malformed URL raises without echoing it (P1-3).
+    database_url = parse_database_url(url or config.DATABASE_URL)
     connect_args = {}
-    if database_url.startswith("sqlite"):
+    if database_url.get_backend_name() == "sqlite":
         connect_args["check_same_thread"] = False
     return create_engine(database_url, connect_args=connect_args, future=True)
 

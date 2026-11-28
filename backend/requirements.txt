@@ -3,7 +3,9 @@
 #
 # Direct dependencies (declared in pyproject.toml):
 #   fastapi, uvicorn[standard], pydantic (v2), SQLAlchemy 2.x, alembic, pillow,
-#   pytest, hypothesis, httpx, openai, tzdata
+#   pytest, hypothesis, httpx, openai, tzdata, psycopg[binary] (PostgreSQL driver;
+#   the pyproject "postgres" extra; on Python >= 3.13 its only runtime
+#   dependency is psycopg-binary)
 # All other entries are transitive and pinned for reproducibility.
 
 alembic==1.20.1
@@ -24,10 +26,13 @@ iniconfig==2.3.1
 jiter==0.19.0
 Mako==1.4.3
 MarkupSafe==3.0.4
+openai==1.109.1
 opentelemetry-api==1.45.2
 packaging==26.3
 pillow==13.0.0
 pluggy==1.7.0
+psycopg==3.2.3
+psycopg-binary==3.2.3
 pydantic==2.14.2
 pydantic_core==2.50.2
 Pygments==2.21.0

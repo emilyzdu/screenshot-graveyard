@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -45,6 +46,24 @@ class Workspace(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
+class GlobalCounter(Base):
+    """Deployment-wide usage counters (deployment readiness R5, R8).
+
+    The ONE deliberately unscoped table: it holds no workspace data, only
+    aggregate counts that must span all workspaces (a per-workspace quota alone
+    cannot bound a public app, because anyone can mint a workspace). Keys:
+    ``ai_calls:YYYY-MM-DD`` (UTC day) and ``storage_bytes``. Read and updated
+    only through ``app.services.global_usage_service`` under a row lock.
+    """
+
+    __tablename__ = "global_counter"
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
 

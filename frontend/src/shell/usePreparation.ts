@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import type { ApiFailure, ApiResult, Preparation, ProviderMode } from '../api/ai';
 import { OPERATION_KIND_BY_ACTION, type PreparationAction } from '../api/preparationKinds';
 import { boundedFetch } from '../api/boundedFetch';
-import { describeOperationOutcome } from '../ai/messages';
+import { describeLimitFailure, describeOperationOutcome } from '../ai/messages';
 import { pollOperation } from '../ai/pollOperation';
 import { DEFAULT_MAX_POLLS, DEFAULT_POLL_INTERVAL_MS } from '../ai/useOperationPolling';
 
@@ -38,7 +38,7 @@ export function describeRejection(f: ApiFailure): { text: string; canRetry: bool
     return { text: 'Preparing drafts is turned off with a real AI provider until a safety fix ships. Nothing was prepared.', canRetry: false };
   }
   if (f.status === 404) return { text: 'This screenshot could not be found in your workspace. Nothing was prepared.', canRetry: false };
-  if (f.status === 429) return { text: 'This workspace’s AI request allowance is used up. Nothing was prepared.', canRetry: false };
+  if (f.status === 429) return { text: describeLimitFailure(f, 'Nothing was prepared.') ?? 'This workspace’s AI request allowance is used up. Nothing was prepared.', canRetry: false };
   if (f.status >= 400 && f.status < 500) return { text: 'The request was not accepted. Nothing was prepared.', canRetry: false };
   if (f.status === 503 && (f.code === 'service_unavailable' || f.code === 'identity_unavailable')) {
     return { text: 'The service is temporarily unavailable. Nothing was prepared; try again shortly.', canRetry: true };
