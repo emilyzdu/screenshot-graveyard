@@ -5,7 +5,7 @@
 // API key, a provider user id or a connected account id, and this module never
 // sends one: connections are identified by toolkit, destinations are bound by
 // the server. Every status shown in the UI comes from these responses.
-import type { ApiResult } from './ai';
+import type { ApiResult, VersionInfo } from './ai';
 
 type Fetch = typeof fetch;
 type Obj = Record<string, unknown>;
@@ -245,9 +245,22 @@ export function getLatestActionPlan(screenshotId: number, f: Fetch = fetch) {
 export function getPlanOperation(operationId: number, f: Fetch = fetch) {
   return call(`/api/operations/${operationId}`, 'GET', undefined, parsePlanOperation, f);
 }
-export function getActionPlan(artifactId: number, f: Fetch = fetch) {
-  return call(`/api/action-plans/${artifactId}`, 'GET', undefined, parsePlan, f);
+export function getActionPlan(artifactId: number, f: Fetch = fetch, versionId?: number) {
+  return call(`/api/action-plans/${artifactId}${versionId === undefined ? '' : `?versionId=${versionId}`}`, 'GET', undefined, parsePlan, f);
 }
+export function listActionPlanVersions(artifactId: number, f: Fetch = fetch) {
+  return call(`/api/action-plans/${artifactId}/versions`, 'GET', undefined, (body) => {
+    if (!isObj(body) || !Array.isArray(body.versions)) return null;
+    const versions: VersionInfo[] = [];
+    for (const entry of body.versions) {
+      if (!isObj(entry) || typeof entry.versionId !== 'number' || typeof entry.versionNumber !== 'number' ||
+        typeof entry.origin !== 'string' || typeof entry.isCurrent !== 'boolean') return null;
+      versions.push({ versionId: entry.versionId, versionNumber: entry.versionNumber, origin: entry.origin, isCurrent: entry.isCurrent });
+    }
+    return versions;
+  }, f);
+}
+
 export function saveActionPlanRevision(plan: ActionPlan, actions: { index: number; enabled: boolean; block: ArgumentBlock; args: Record<string, unknown> }[], f: Fetch = fetch) {
   return call(`/api/action-plans/${plan.artifactId}/revisions`, 'POST', {
     baseVersionId: plan.versionId,

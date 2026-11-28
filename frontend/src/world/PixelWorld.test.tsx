@@ -28,14 +28,14 @@ beforeEach(() => {
 });
 
 describe('PixelWorld', () => {
-  it('renders real ghosts as labelled buttons and counts the crypt', async () => {
+  it('renders active screenshots as labelled ghosts and counts the waiting queue', async () => {
     client.listScreenshots.mockResolvedValue({ ok: true, screenshots: [shot(1), shot(2), shot(3), shot(4, { state: 'archived' })] });
     render(<PixelWorld />);
     const ghosts = await waitFor(() => {
       const g = document.querySelectorAll('button[data-ghost-id]'); expect(g).toHaveLength(3); return g;
     });
     expect(ghosts[0]).toHaveAccessibleName(/real-1\.png: Not analyzed yet/);
-    expect(screen.getByText(/Crypt: 1 resting screenshot/)).toBeInTheDocument();
+    expect(screen.getByText(/ghosts waiting/)).toBeInTheDocument();
     expect(screen.queryByText(/Demo data|not reachable/)).not.toBeInTheDocument();
     fireEvent.click(ghosts[1]);
     expect(screen.getByRole('dialog', { name: /real-2\.png/ })).toBeInTheDocument();
@@ -48,17 +48,17 @@ describe('PixelWorld', () => {
     expect(screen.getByRole('button', { name: /3 more screenshots/ })).toBeInTheDocument();
   });
 
-  it('labels synthetic data when the backend is unreachable', async () => {
+  it('keeps the map available without inventing records when the backend is unreachable', async () => {
     client.listScreenshots.mockResolvedValue({ ok: false, error: 'Network request failed' });
     render(<PixelWorld />);
-    expect(await screen.findByText(/Backend not reachable/)).toBeInTheDocument();
-    expect(document.querySelectorAll('button[data-ghost-id]').length).toBeGreaterThan(0);
+    expect(await screen.findByText(/Screenshot records are unavailable/)).toBeInTheDocument();
+    expect(document.querySelectorAll('button[data-ghost-id]')).toHaveLength(0);
   });
 
   it('uses demo fixtures without any API call for ?demo=1', async () => {
     window.history.replaceState({}, '', '/?view=world&demo=1');
     render(<PixelWorld />);
-    expect(await screen.findByText(/Demo data \(prototype\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Demo Mode/)).toBeInTheDocument();
     expect(client.getWorkspace).not.toHaveBeenCalled();
     expect(client.listScreenshots).not.toHaveBeenCalled();
   });
@@ -69,7 +69,9 @@ describe('PixelWorld', () => {
     const tower = await screen.findByRole('button', { name: 'Clock Tower' });
     fireEvent.click(tower);
     expect(screen.getByRole('dialog', { name: /Clock Tower/ })).toBeInTheDocument();
-    expect(screen.getAllByRole('link', { name: /List view/ })[0]).toHaveAttribute('href', '?');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.click(screen.getByRole('button', { name: 'Quick Queue' }));
+    expect(screen.getByRole('link', { name: /List view/i })).toHaveAttribute('href', '?');
     const lumi = screen.getByTestId('lumi');
     const before = lumi.style.transform;
     const input = document.createElement('input'); document.body.appendChild(input);

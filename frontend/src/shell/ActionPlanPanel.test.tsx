@@ -116,6 +116,19 @@ describe('ActionPlanPanel', () => {
     expect(document.body.textContent).not.toMatch(/delivered/i);
   });
 
+  it('blocks another Run after a lost dispatch even if an older attempt was known to fail', async () => {
+    const approvedPlan = plan({ screenshotId: 91, approval: { state: 'approved', approvedAt: 'now' }, executions: [execution('failed')] });
+    tools.getActionPlan.mockResolvedValue({ ok: true, data: approvedPlan });
+    tools.executeAction.mockResolvedValue({ ok: false, status: 0, code: 'network', message: 'Network request failed' });
+    render(<ActionPlanPanel screenshotId={91} providerMode="fake" />);
+    fireEvent.click(await screen.findByLabelText(/Create this in Google Calendar now/));
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    expect(await screen.findByText(/Run is unavailable until this dispatch can be reconciled/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Run' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Check execution record' }));
+    expect(tools.executeAction).toHaveBeenCalledTimes(1);
+  });
+
   it('reports an unknown outcome honestly and offers no retry', async () => {
     tools.getActionPlan.mockResolvedValue({ ok: true, data: plan({ approval: { state: 'approved', approvedAt: 'now' }, executions: [execution('unknown')] }) });
     render(<ActionPlanPanel screenshotId={3} providerMode="openai" />);

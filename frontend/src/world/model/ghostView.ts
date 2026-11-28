@@ -1,4 +1,5 @@
 import type { Screenshot } from '../../api/client';
+import type { GhostStage } from './lifecycle';
 
 export type GhostLocation = 'well' | 'crossroads';
 export type GhostBadge = 'none' | 'book' | 'image' | 'question' | 'lock';
@@ -20,6 +21,8 @@ export interface GhostView {
   accessory: number;
   isDuplicate: boolean;
   uploadedAt: string;
+  stage?: GhostStage;
+  tools?: string[];
 }
 
 /** Cheap integer mix (Knuth multiplicative); stable for a given id. */

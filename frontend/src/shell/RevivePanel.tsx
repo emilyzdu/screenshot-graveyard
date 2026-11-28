@@ -111,6 +111,8 @@ interface Props {
   autoMode?: boolean;
   /** Batch 6B: the server confirmed a consent GRANT made in this panel. */
   onConsentGranted?: () => void;
+  onConsentChanged?: (granted: boolean) => void;
+  onReviveChanged?: (state: 'analyzing' | 'failed' | 'unknown' | null, operationId: number | null) => void;
 }
 
 /**
@@ -133,8 +135,12 @@ export function RevivePanel({
   maxPolls = DEFAULT_MAX_POLLS,
   autoMode = false,
   onConsentGranted,
+  onConsentChanged,
+  onReviveChanged,
 }: Props) {
   const id = screenshot.screenshotId;
+  const reviveChanged = useRef(onReviveChanged);
+  reviveChanged.current = onReviveChanged;
   const archived = screenshot.state === 'archived';
   // Consent reads are bounded and cancelled when this panel unmounts.
   const { status: consentMap, set: setConsentLookup, refresh: refreshConsent } = useConsent([id], 0, {
@@ -242,6 +248,7 @@ export function RevivePanel({
       markReviveActive(id, opId);
       watchingRef.current = true;
       setRun({ t: 'polling', opId });
+      reviveChanged.current?.('analyzing', opId);
       const outcome = await pollOperation(opId, {
         intervalMs: pollIntervalMs,
         maxPolls,
@@ -256,6 +263,7 @@ export function RevivePanel({
       if (outcome.kind === 'done') {
         releaseRevive(id);
         setRun({ t: 'done', status: outcome.status, errorDetail: outcome.errorDetail });
+        reviveChanged.current?.(outcome.status === 'failed' ? 'failed' : outcome.status === 'uncertain' ? 'unknown' : null, null);
         if (outcome.status === 'successful') {
           // Confirmed in the same step as the terminal status: no window in which
           // a pending or failed result read could make Revive eligible again.
@@ -268,6 +276,7 @@ export function RevivePanel({
       } else if (outcome.kind === 'not_found') {
         releaseRevive(id);
         setRun({ t: 'idle' });
+        reviveChanged.current?.(null, null);
         setMessage({ error: true, text: 'The server has no record of that Revive. Nothing is assumed; you can Revive again.' });
       } else {
         markReviveUnresolved(id);
@@ -359,6 +368,7 @@ export function RevivePanel({
         setWithdrawal(null);
         setConsentLookup(id, res.data ? 'granted' : 'not_granted');
         if (res.data) onConsentGranted?.();
+        onConsentChanged?.(res.data);
         setMessage({
           error: false,
           text: res.data

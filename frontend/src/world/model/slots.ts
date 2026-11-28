@@ -1,44 +1,41 @@
 import type { GhostLocation, GhostView } from './ghostView';
 
 export const MAX_GHOSTS = 24;
-const GRID: Record<GhostLocation, { x0: number; y0: number; dx: number; dy: number; cols: number; rows: number }> = {
-  well: { x0: 196, y0: 222, dx: 28, dy: 22, cols: 8, rows: 3 },
-  crossroads: { x0: 196, y0: 296, dx: 28, dy: 20, cols: 8, rows: 3 },
-};
-const COL_ORDER = [3, 4, 2, 5, 1, 6, 0, 7];
 
 export interface Slot { x: number; y: number }
 export interface Placed { ghost: GhostView; slot: Slot }
 export interface Crowd { location: GhostLocation; count: number; slot: Slot }
 export interface Layout { placed: Placed[]; crowds: Crowd[] }
 
-export function slotAt(location: GhostLocation, rank: number): Slot {
-  const g = GRID[location]; const perRow = g.cols;
-  const row = Math.floor(rank / perRow) % g.rows; const col = COL_ORDER[rank % perRow];
-  return { x: g.x0 + col * g.dx, y: g.y0 + row * g.dy };
-}
+// Clearings and paths in the illustration, ordered to keep the first ghosts spaced out.
+const SLOTS: readonly Slot[] = [
+  { x: 275, y: 291 }, { x: 380, y: 254 }, { x: 158, y: 253 }, { x: 420, y: 285 },
+  { x: 304, y: 238 }, { x: 489, y: 279 }, { x: 181, y: 207 }, { x: 561, y: 258 },
+  { x: 336, y: 315 }, { x: 115, y: 280 }, { x: 398, y: 318 }, { x: 425, y: 189 },
+  { x: 219, y: 288 }, { x: 343, y: 264 }, { x: 257, y: 180 }, { x: 527, y: 235 },
+  { x: 387, y: 217 }, { x: 137, y: 221 }, { x: 594, y: 259 }, { x: 184, y: 281 },
+  { x: 284, y: 214 }, { x: 267, y: 328 }, { x: 465, y: 187 }, { x: 374, y: 343 },
+];
 
-/**
- * Deterministic layout. Rank is the position of the id among ids in the same
- * location, so a ghost keeps its slot until ids appear or disappear below it.
- * Only MAX_GHOSTS ghosts are drawn; the rest of each location becomes a crowd marker.
- */
-export function layoutGhosts(ghosts: readonly GhostView[]): Layout {
+export function layoutGhosts(ghosts: readonly GhostView[], activeSlots?: Map<number, number>): Layout {
   const sorted = [...ghosts].sort((a, b) => a.id - b.id);
-  const ranks: Record<GhostLocation, number> = { well: 0, crossroads: 0 };
-  const placed: Placed[] = []; const overflow: Record<GhostLocation, number> = { well: 0, crossroads: 0 };
-  let drawn = 0;
-  for (const g of sorted) {
-    if (drawn < MAX_GHOSTS) {
-      placed.push({ ghost: g, slot: slotAt(g.location, ranks[g.location]++) }); drawn++;
-    } else overflow[g.location]++;
-  }
-  const crowds: Crowd[] = [];
-  for (const loc of ['well', 'crossroads'] as const) {
-    if (overflow[loc] > 0) {
-      const base = GRID[loc];
-      crowds.push({ location: loc, count: overflow[loc], slot: { x: base.x0 + 8 * base.dx + 4, y: base.y0 + base.dy } });
+  const shown = sorted.slice(0, MAX_GHOSTS);
+  const slots = activeSlots ?? new Map<number, number>();
+  const ids = new Set(shown.map((ghost) => ghost.id));
+  for (const id of slots.keys()) if (!ids.has(id)) slots.delete(id);
+  const occupied = new Set(slots.values());
+  const placed = shown.map((ghost) => {
+    let slot = slots.get(ghost.id);
+    if (slot === undefined) {
+      slot = SLOTS.findIndex((_, index) => !occupied.has(index));
+      occupied.add(slot);
+      slots.set(ghost.id, slot);
     }
-  }
-  return { placed, crowds };
+    return { ghost, slot: SLOTS[slot] };
+  });
+  const remaining = sorted.length - shown.length;
+  return {
+    placed,
+    crowds: remaining > 0 ? [{ location: 'well', count: remaining, slot: { x: 320, y: 344 } }] : [],
+  };
 }

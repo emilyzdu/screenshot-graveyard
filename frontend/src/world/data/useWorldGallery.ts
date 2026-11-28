@@ -5,7 +5,7 @@ import { buildDemoScreenshots } from './worldFixtures';
 /**
  * live:     real GET /api/screenshots (read-only).
  * demo:     requested with ?demo=1; synthetic ghosts, no API calls.
- * fallback: the API was unreachable on first load; synthetic ghosts, labelled.
+ * fallback: the API was unreachable on first load; keep the world available without records.
  */
 export type GalleryMode = 'live' | 'demo' | 'fallback';
 export interface Gallery {
@@ -47,7 +47,7 @@ export function useWorldGallery(): Gallery {
     if (mine !== ticket.current) return; // latest read wins
     if (list) { hasLive.current = true; setState({ loading: false, mode: 'live', screenshots: list, error: null }); }
     else if (hasLive.current) setState((s) => ({ ...s, loading: false, error: failure })); // keep real data
-    else setState({ loading: false, mode: 'fallback', screenshots: buildDemoScreenshots(demoCount(window.location.search)), error: failure });
+    else setState({ loading: false, mode: 'fallback', screenshots: [], error: failure });
   }, [demo]);
 
   useEffect(() => {
@@ -59,5 +59,6 @@ export function useWorldGallery(): Gallery {
     return () => { tk.current++; document.removeEventListener('visibilitychange', onVisible); };
   }, [demo, load]);
 
-  return { ...state, refresh: () => void load() };
+  const refresh = useCallback(() => void load(), [load]);
+  return { ...state, refresh };
 }

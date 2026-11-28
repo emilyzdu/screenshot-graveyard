@@ -24,7 +24,7 @@ export function SettingsOverlay({ synthetic }: { synthetic: boolean }) {
       {synthetic ? (
         <p role="note">Provider and automation settings are read from the backend, which demo data does not use. Open the world with the backend running to see them.</p>
       ) : <LiveSettings />}
-      <p><a className="pw-btn" href="?">List view</a></p>
+      <p><a className="pw-btn" href="?">Open List View</a></p>
     </div>
   );
 }

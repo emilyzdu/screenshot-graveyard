@@ -1,49 +1,27 @@
-import { memo, useEffect, useState } from 'react';
-import { assetUrl } from '../assets';
-import { hash, ACCESSORIES, type GhostView } from '../model/ghostView';
+import { memo } from 'react';
+import { ghostArt } from '../illustrated/art';
+import type { GhostView } from '../model/ghostView';
+import { ghostStages, toolMarks } from '../model/lifecycle';
 import type { Slot } from '../model/slots';
-import { GHOST_SHEET } from '../model/spriteSpec';
-import { Badge } from './Badge';
 
-const WANDER_RADIUS = 12;
-
-export interface GhostSpriteProps {
-  ghost: GhostView; slot: Slot; selected: boolean; reducedMotion: boolean; demo: boolean;
+interface GhostSpriteProps {
+  ghost: GhostView; slot: Slot; selected: boolean; near: boolean; reducedMotion: boolean; demo: boolean;
   onSelect: (id: number, opener: HTMLElement) => void;
 }
 
-function GhostSpriteImpl({ ghost, slot, selected, reducedMotion, demo, onSelect }: GhostSpriteProps) {
-  const [off, setOff] = useState({ x: 0, y: 0 });
-  const idle = reducedMotion || selected;
-  useEffect(() => {
-    if (idle) return;
-    let n = hash(ghost.id); let t: number;
-    const next = () => {
-      n = hash(n);
-      const a = ((n & 0xff) / 255) * Math.PI * 2, r = (((n >>> 8) & 0xff) / 255) * WANDER_RADIUS;
-      setOff({ x: Math.round(Math.cos(a) * r), y: Math.round((Math.sin(a) * r) / 2) });
-      t = window.setTimeout(next, 2000 + ((n >>> 16) % 3000));
-    };
-    t = window.setTimeout(next, 600 + (n % 2400));
-    return () => window.clearTimeout(t);
-  }, [ghost.id, idle]);
-  const shown = idle ? { x: 0, y: 0 } : off;
-  const accessory = ACCESSORIES[ghost.accessory];
-  const label = `${ghost.filename}${demo ? ' (demo)' : ''}: ${ghost.label}${ghost.category ? `, ${ghost.category}` : ''}${ghost.isDuplicate ? ', duplicate upload' : ''}`;
+export const GhostSprite = memo(function GhostSprite({ ghost, slot, selected, near, reducedMotion, demo, onSelect }: GhostSpriteProps) {
+  const stage = ghost.stage && ghostStages[ghost.stage];
+  const label = `${ghost.filename}${demo ? ' (demo)' : ''}: ${ghost.label}${ghost.tools?.length ? `, ${ghost.tools.map((tool) => toolMarks[tool]?.label ?? tool).join(', ')}` : ''}`;
   return (
-    <button
-      type="button" className={`pw-ghost${selected ? ' is-selected' : ''}`} aria-label={label} aria-pressed={selected}
-      data-ghost-id={ghost.id} data-accessory={accessory} data-location={ghost.location}
-      style={{ left: slot.x - 16, top: slot.y - 40, zIndex: 10 + slot.y, transform: `translate(${shown.x}px, ${shown.y}px)`, ['--pw-gx' as string]: `${-ghost.tint * GHOST_SHEET.frameW * GHOST_SHEET.framesPerTint}px`, ['--pw-gx2' as string]: `${-(ghost.tint * GHOST_SHEET.framesPerTint + 1) * GHOST_SHEET.frameW}px`, ['--pw-gy' as string]: `${-ghost.accessory * GHOST_SHEET.frameH}px`, ['--pw-sheet' as string]: `url(${assetUrl('ghost-sheet')})` }}
-      onClick={(e) => onSelect(ghost.id, e.currentTarget)}
-    >
-      <span className="pw-ghost__badge">
-        {ghost.badge !== 'none' ? <Badge kind={ghost.badge} /> : <span className="pw-ghost__dot" aria-hidden="true" />}
+    <button type="button" className="pw-ghost" aria-label={label} aria-pressed={selected} title={label}
+      data-ghost-id={ghost.id} data-location={ghost.location} data-ghost-state={ghost.stage} data-near={near || undefined} data-reduced={reducedMotion || undefined}
+      style={{ left: slot.x, top: slot.y, zIndex: 20 + slot.y, animationDelay: `${-(ghost.id % 7) / 4}s` }}
+      onClick={(event) => onSelect(ghost.id, event.currentTarget)}>
+      <span className="pw-ghost__figure">
+        <img className="pw-ghost__body" src={ghostArt[stage ? stage.pose : 'waiting']} alt="" draggable={false} />
+        {stage && <span className="pw-ghost__mark" aria-hidden="true">{stage.mark}</span>}
       </span>
-      <span className="pw-ghost__body" aria-hidden="true" />
-      {ghost.isDuplicate && <span className="pw-ghost__dup" aria-hidden="true">2</span>}
-      {selected && <img className="pw-ghost__brackets" src={assetUrl('selection-brackets')} alt="" />}
+      {!!ghost.tools?.length && <span className="pw-ghost__tools" aria-hidden="true">{ghost.tools.map((tool) => <span key={tool}>{toolMarks[tool]?.mark ?? '·'}</span>)}</span>}
     </button>
   );
-}
-export const GhostSprite = memo(GhostSpriteImpl);
+});

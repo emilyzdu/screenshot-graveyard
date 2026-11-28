@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LOCATIONS, PROPS, STAGE } from '../model/locations';
+import { STAGE } from '../model/locations';
 import { artScale, GHOST_SHEET, LUMI_SHEET } from '../model/spriteSpec';
 
 // Guards the art pipeline: every PNG must be exactly its per-asset scale (1x, or 3x if listed in HD_ASSETS) x its logical box,
@@ -19,8 +19,6 @@ const logical: Record<string, [number, number]> = {
   'lumi-sheet': [LUMI_SHEET.frameW * LUMI_SHEET.cols, LUMI_SHEET.frameH * LUMI_SHEET.rows],
   'ghost-sheet': [GHOST_SHEET.frameW * GHOST_SHEET.tints * GHOST_SHEET.framesPerTint, GHOST_SHEET.frameH * GHOST_SHEET.accessories],
 };
-for (const l of LOCATIONS) logical[l.asset] = [l.sprite.w, l.sprite.h];
-for (const p of PROPS) logical[p.asset] = [p.w, p.h];
 
 describe('world art dimensions', () => {
   for (const [name, [w, h]] of Object.entries(logical)) {

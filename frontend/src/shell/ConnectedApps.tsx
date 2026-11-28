@@ -71,7 +71,7 @@ export function ConnectedApps({ readOnly = false }: { readOnly?: boolean }) {
       <p className="pw-muted">{modeNote(d)}</p>
       <ul className="sg-apps">
         {d.toolkits.map((t) => (
-          <li key={t.toolkit}>
+          <li key={t.toolkit} data-toolkit={t.toolkit}>
             <strong>{t.label}</strong>{' '}
             <span className="pw-badge-text" data-testid={`app-status-${t.toolkit}`}>
               {t.configured ? STATUS_TEXT[t.status] : 'Not set up on this server'}

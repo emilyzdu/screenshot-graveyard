@@ -239,9 +239,29 @@ function toFileResult(value: unknown): UploadFileResult | null {
   };
 }
 
+function uploadWithProgress(form: FormData, onProgress: (fraction: number) => void): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', '/api/screenshots');
+    request.setRequestHeader('X-Requested-With', 'fetch');
+    request.setRequestHeader('Accept', 'application/json');
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) onProgress(event.loaded / event.total);
+    };
+    request.onload = () => {
+      // Response forbids a body on empty statuses such as 204.
+      if (request.status >= 200) resolve(new Response(request.responseText || null, { status: request.status }));
+      else reject(new Error('Upload interrupted'));
+    };
+    request.onerror = request.onabort = () => reject(new Error('Upload interrupted'));
+    request.send(form);
+  });
+}
+
 export async function uploadScreenshots(
   files: File[],
   fetchImpl: typeof fetch = fetch,
+  onProgress?: (fraction: number) => void,
 ): Promise<UploadResult> {
   const form = new FormData();
   for (const file of files) {
@@ -249,13 +269,15 @@ export async function uploadScreenshots(
   }
   let response: Response;
   try {
-    response = await fetchImpl('/api/screenshots', {
-      method: 'POST',
-      // CSRF: custom header required on state-changing requests.
-      headers: { 'X-Requested-With': 'fetch', Accept: 'application/json' },
-      credentials: 'same-origin',
-      body: form,
-    });
+    response = onProgress && typeof XMLHttpRequest !== 'undefined'
+      ? await uploadWithProgress(form, onProgress)
+      : await fetchImpl('/api/screenshots', {
+        method: 'POST',
+        // CSRF: custom header required on state-changing requests.
+        headers: { 'X-Requested-With': 'fetch', Accept: 'application/json' },
+        credentials: 'same-origin',
+        body: form,
+      });
   } catch {
     return { ok: false, error: 'Network request failed' };
   }

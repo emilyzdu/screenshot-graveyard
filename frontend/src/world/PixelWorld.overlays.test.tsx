@@ -88,7 +88,7 @@ describe('PixelWorld overlays', () => {
     expect(document.activeElement).toBe((await ghostButtons())[1]);
   });
 
-  it.each([['Clock Tower', /Clock Tower/], ['Library', /Library/], ['Crypt', /Crypt/], ['Portal', /Portal/], ['Upload Well', /Upload Well/], ['Approval Altar', /Approval Altar/]])(
+  it.each([['Clock Tower', /Clock Tower/], ['Memory Library', /Library/], ['Crypt', /Crypt/], ['Portal Hall', /Portal/], ['Upload Well', /Upload Well/], ['Approval Altar', /Approval Altar/]])(
     '12: the %s hotspot opens its overlay at once', async (name, title) => {
       render(<PixelWorld />);
       await screen.findByTestId('lumi'); fireEvent.click(hot(name));
@@ -128,11 +128,11 @@ describe('PixelWorld overlays', () => {
       fireEvent.click(g); await screen.findByRole('dialog'); await act(async () => { await Promise.resolve(); });
       fireEvent.keyDown(window, { key: 'Escape' }); await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     }
-    for (const name of ['Clock Tower', 'Library', 'Upload Well', 'Approval Altar', 'Crypt', 'Portal']) {
+    for (const name of ['Clock Tower', 'Memory Library', 'Upload Well', 'Approval Altar', 'Crypt', 'Portal Hall']) {
       fireEvent.click(hot(name)); await screen.findByRole('dialog');
       fireEvent.keyDown(window, { key: 'Escape' }); await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     }
-    for (const t of ['queue', 'settings', 'calendar', 'notes']) {
+    for (const t of ['queue', 'settings', 'upload']) {
       fireEvent.click(document.querySelector(`[data-tool="${t}"]`)!); await screen.findByRole('dialog');
       fireEvent.keyDown(window, { key: 'Escape' }); await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     }
@@ -149,7 +149,7 @@ describe('PixelWorld overlays', () => {
     fireEvent.click((await ghostButtons())[0]);
     expect(await screen.findByText(/synthetic screenshot/)).toBeInTheDocument();
     fireEvent.keyDown(window, { key: 'Escape' });
-    for (const name of ['Crypt', 'Upload Well', 'Approval Altar', 'Portal']) {
+    for (const name of ['Crypt', 'Upload Well', 'Approval Altar', 'Portal Hall']) {
       fireEvent.click(hot(name)); await screen.findByRole('dialog');
       fireEvent.keyDown(window, { key: 'Escape' }); await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     }
@@ -157,11 +157,11 @@ describe('PixelWorld overlays', () => {
     for (const [k, m] of Object.entries({ ...client, ...ai })) expect(m, k).not.toHaveBeenCalled();
   });
 
-  it('16: the Portal shows Not connected and never says delivered', async () => {
+  it('16: the Portal surfaces a connection read error without inventing a delivery', async () => {
     render(<PixelWorld />);
-    await screen.findByTestId('lumi'); fireEvent.click(hot('Portal'));
+    await screen.findByTestId('lumi'); fireEvent.click(hot('Portal Hall'));
     const dialog = screen.getByRole('dialog', { name: /Portal/ });
-    expect(within(dialog).getByText('Not connected')).toBeInTheDocument();
+    expect(await within(dialog).findByText('Connected apps could not be loaded.')).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/delivered/i);
   });
 
@@ -217,15 +217,16 @@ describe('PixelWorld overlays', () => {
     expect(await screen.findByText(/was resurrected/)).toBeInTheDocument();
   });
 
-  it('Settings links to the list view; Altar stamp is a labelled prototype', async () => {
+  it('Settings links to List View and the Altar opens the real action card', async () => {
     render(<PixelWorld />);
     fireEvent.click(document.querySelector('[data-tool="settings"]')!);
     expect(await screen.findByTestId('provider-badge')).toHaveTextContent(/Real AI/);
-    expect(within(screen.getByRole('dialog')).getByRole('link', { name: 'List view' })).toHaveAttribute('href', '?');
+    expect(within(screen.getByRole('dialog')).getByRole('link', { name: /List View/i })).toHaveAttribute('href', '?');
     fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.click(hot('Approval Altar'));
-    expect(screen.getByText('Prototype stamp')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Preview stamp' }));
-    expect(screen.getByTestId('stamp-pad')).toHaveClass('is-stamped');
+    expect(screen.getByText(/approve the saved version/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /real-1.png/ }));
+    expect(await screen.findByRole('dialog', { name: /real-1.png/ })).toBeInTheDocument();
+    expectNoPaidCalls();
   });
 });
