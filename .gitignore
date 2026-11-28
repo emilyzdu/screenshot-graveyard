@@ -63,3 +63,6 @@ backend/local.db
 backend/var/
 alembic_tmp.db
 **/alembic_tmp.db
+
+# Dev-only Playwright captures
+frontend/.shots/

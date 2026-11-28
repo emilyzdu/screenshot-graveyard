@@ -26,5 +26,25 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // The world's scene, Lumi, HUD and model code is pure presentation; only
+    // world/data and the overlays may reach the API (types are allowed).
+    files: ['src/world/{scene,lumi,model,hud}/**/*.{ts,tsx}'],
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/api/*', '**/api'],
+              allowTypeImports: true,
+              message: 'World scene, lumi, hud and model code must not call the API.',
+            },
+          ],
+        },
+      ],
+    },
+  },
   prettier,
 );

@@ -116,6 +116,17 @@ describe('App mode selection', () => {
     }
   });
 
+  it('lazy-loads the Pixel World for ?view=world and leaves / on the workspace', async () => {
+    window.history.pushState({}, '', '/?view=world&demo=1');
+    try {
+      render(<App />);
+      expect(await screen.findByTestId('pixel-world')).toBeInTheDocument();
+      expect(screen.queryByTestId('live-workspace')).not.toBeInTheDocument();
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
   it('keeps the classic workflows available', async () => {
     window.history.replaceState({}, '', '/?view=classic');
     render(<App />);
