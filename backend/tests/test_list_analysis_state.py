@@ -25,6 +25,7 @@ from app.db import models
 from app.db.base import Base
 from app.main import create_app
 from app.ratelimit import TokenBucketRateLimiter
+from tests.consent_helpers import grant_body
 
 TRUSTED = config.TRUSTED_ORIGINS[0]
 HDRS = {"Origin": TRUSTED, "X-Requested-With": "fetch"}
@@ -65,7 +66,7 @@ def _upload(c, n):
 
 
 def _analyse(c, sid):
-    c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+    c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
     op = c.post(f"/api/screenshots/{sid}/classify", headers=HDRS).json()["operationId"]
     assert c.get(f"/api/operations/{op}").json()["status"] == "successful"
 
@@ -80,14 +81,15 @@ def test_only_analysed_screenshots_carry_analysis_and_the_rest_are_ghosts(client
     got = _by_id(client)
     assert got[ghost]["analysis"] is None
     a = got[revived]["analysis"]
-    assert set(a) == {"category", "uncertain", "epitaph", "epitaphOrigin"}
+    assert set(a) == {"category", "uncertain", "epitaph", "epitaphOrigin", "epitaphProvider"}
+    assert a["epitaphProvider"] in ("fake", None)  # Batch 6A (P2-E): recorded, never inferred
     assert a["category"] == "Reference/Document" and a["epitaph"] and a["epitaphOrigin"] == "ai_generate"
     assert a["uncertain"] is False
 
 
 def test_uploading_or_consenting_alone_never_makes_a_ghost_analysed(client):
     sid = _upload(client, 1)
-    client.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+    client.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
     assert _by_id(client)[sid]["analysis"] is None      # consent is not analysis
 
 

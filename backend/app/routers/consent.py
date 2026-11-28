@@ -19,10 +19,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.db.session import get_session
 from app.services.consent_service import (
+    DisclosureChangedError,
     ConsentService,
     ConsentServiceError,
     ConsentServiceUnavailableError,
@@ -32,6 +33,15 @@ from app.services.consent_service import (
 
 class ConsentBody(BaseModel):
     granted: bool
+    # P1-A: the disclosure the user was shown (from GET /api/ai/disclosure).
+    # Required for a grant and checked against the server's current one.
+    provider: str | None = Field(default=None, max_length=32)
+    disclosureRevision: str | None = Field(default=None, max_length=64)
+
+
+class _ShownDisclosure:
+    def __init__(self, provider: str, revision: str) -> None:
+        self.provider, self.revision = provider, revision
 
 
 def _error_body(code: str, message: str) -> dict:
@@ -91,7 +101,25 @@ def build_consent_router() -> APIRouter:
         try:
             svc = ConsentService(session, workspace_id)
             try:
-                state = svc.record_consent(screenshot_id, body.granted)
+                shown = (
+                    _ShownDisclosure(body.provider, body.disclosureRevision)
+                    if body.provider is not None and body.disclosureRevision is not None
+                    else None
+                )
+                state = svc.record_consent(screenshot_id, body.granted, disclosure=shown)
+            except DisclosureChangedError as exc:
+                # Nothing recorded. The browser must show the current disclosure
+                # and ask again; it never re-submits on its own.
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        **_error_body(
+                            "disclosure_changed",
+                            "The AI processing disclosure changed. Review it and choose again.",
+                        ),
+                        "disclosure": exc.current.as_dict(),
+                    },
+                )
             except ScreenshotNotFoundError:
                 return JSONResponse(status_code=404, content=_error_body("not_found", "Not Found"))
             except ConsentServiceUnavailableError:

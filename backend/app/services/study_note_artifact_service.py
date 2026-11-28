@@ -27,9 +27,25 @@ from app.services.artifact_version_service import (
     ArtifactVersionService,
     VersionConflictError,
 )
+from app.services.draft_versioning import (
+    DraftSourceArchivedError,
+    DraftSourceMissingError,
+    DraftVersionConflictError,
+    field_origins,
+    require_sources_active,
+)
 
 _KIND_STUDY_NOTE = "study_note"
 _ORIGIN_MANUAL_EDIT = "manual_edit"
+# Editable sections, in display order. ``references`` is provenance, not content.
+NOTE_FIELDS: tuple[str, ...] = (
+    "topic",
+    "main_concepts",
+    "extracted_code",
+    "code_explanations",
+    "pitfalls",
+    "uncertain_content",
+)
 
 
 class StudyNoteArtifactError(Exception):
@@ -74,6 +90,11 @@ class StudyNoteVersion:
     origin: str
     content: StudyNoteResult
     source_screenshot_ids: list[int]
+    # Per-section {origin, versionNumber} of the last change, or None if unknown.
+    field_origins: dict[str, dict] | None = None
+    # Set only by an edit: "created", "replayed" (this exact edit already
+    # produced the current version) or "unchanged" (nothing differed).
+    edit_result: str | None = None
 
 
 class StudyNoteArtifactService:
@@ -98,15 +119,7 @@ class StudyNoteArtifactService:
             version = self._repo.get_artifact_version(selected_id)
             if version is None or version.artifact_id != artifact.id:
                 raise StudyNoteArtifactNotFoundError("study note not found")
-            content = self._parse_content(version.content_json)
-            return StudyNoteVersion(
-                artifact_id=artifact.id,
-                version_id=version.id,
-                version_number=version.version_number,
-                origin=version.origin,
-                content=content,
-                source_screenshot_ids=self._source_ids(artifact.id),
-            )
+            return self._version(artifact, version)
         except CrossWorkspaceError as exc:
             raise StudyNoteArtifactNotFoundError("study note not found") from exc
         except SQLAlchemyError as exc:
@@ -162,12 +175,23 @@ class StudyNoteArtifactService:
         except SQLAlchemyError as exc:
             raise StudyNoteArtifactUnavailableError("study note service unavailable") from exc
 
-    def save_edit(self, artifact_id: int, raw_content: object) -> StudyNoteVersion:
+    def save_edit(
+        self, artifact_id: int, raw_content: object, base_version_id: int | None = None
+    ) -> StudyNoteVersion:
         """Insert a retained manual version and repoint current atomically.
 
         The callback neither updates nor deletes a historical version.  If
         validation, flushing, or commit fails, rollback leaves the original
         current pointer and every prior version unchanged.
+
+        ``base_version_id`` (Batch 5A, always sent by the HTTP route) is the
+        version the user edited. Under the workspace lock a stale base raises
+        ``DraftVersionConflictError`` unless this exact edit already produced
+        the current version (a replay, returned without a new insert); an edit
+        identical to the current version inserts nothing. Without a base the
+        service keeps its original behaviour (the design's concurrent
+        Redo + Manual Edit guarantee at the service layer). Edits are refused
+        while any source screenshot is archived.
         """
         try:
             try:
@@ -181,27 +205,42 @@ class StudyNoteArtifactService:
             if self._repo.lock_workspace() is None:
                 raise StudyNoteArtifactNotFoundError("study note not found")
             artifact = self._study_note(artifact_id)
-            source_ids = self._source_ids(artifact.id)
+            current_row = (
+                self._repo.get_artifact_version(artifact.current_version_id)
+                if artifact.current_version_id is not None
+                else None
+            )
+            # The stored note must agree with its authoritative source rows
+            # before anything is appended (never repaired or replaced here).
+            source_ids = (
+                self._consistent_sources(artifact.id, self._parse_content(current_row.content_json))
+                if current_row is not None
+                else self._source_ids(artifact.id)
+            )
+            require_sources_active(self._repo, source_ids)
             content = StudyNoteResult(
                 **editable.model_dump(), references=list(source_ids)
             )
+            if base_version_id is not None:
+                outcome = self._check_base(artifact, base_version_id, content)
+                if outcome is not None:
+                    self._session.rollback()  # release the lock; nothing changed
+                    return outcome
             version = self._versions.append_version(
                 artifact.id,
                 json.dumps(content.model_dump(), ensure_ascii=False),
                 _ORIGIN_MANUAL_EDIT,
             )
+            saved = self._version(artifact, version)  # built BEFORE commit: nothing can fail after it
+            outcome = StudyNoteVersion(**{**saved.__dict__, "edit_result": "created"})
             self._session.commit()
-            return StudyNoteVersion(
-                artifact_id=artifact.id,
-                version_id=version.id,
-                version_number=version.version_number,
-                origin=version.origin,
-                content=content,
-                source_screenshot_ids=source_ids,
-            )
-        except StudyNoteArtifactError:
+            return outcome
+        except (StudyNoteArtifactError, DraftVersionConflictError, DraftSourceArchivedError):
             self._session.rollback()
             raise
+        except DraftSourceMissingError as exc:
+            self._session.rollback()
+            raise StudyNoteArtifactUnavailableError("study note service unavailable") from exc
         except CrossWorkspaceError as exc:
             self._session.rollback()
             raise StudyNoteArtifactNotFoundError("study note not found") from exc
@@ -211,6 +250,10 @@ class StudyNoteArtifactService:
             self._session.rollback()
             raise StudyNoteArtifactUnavailableError("study note service unavailable") from exc
         except SQLAlchemyError as exc:
+            self._session.rollback()
+            raise StudyNoteArtifactUnavailableError("study note service unavailable") from exc
+        except Exception as exc:
+            # Anything unexpected happens before commit, so "not saved" is the truth.
             self._session.rollback()
             raise StudyNoteArtifactUnavailableError("study note service unavailable") from exc
 
@@ -238,6 +281,75 @@ class StudyNoteArtifactService:
         lines.extend(["", "## References", ""])
         lines.extend(f"- Screenshot {sid}" for sid in version.source_screenshot_ids)
         return "\n".join(lines).rstrip() + "\n"
+
+    def _check_base(self, artifact, base_version_id: int, content: StudyNoteResult) -> StudyNoteVersion | None:
+        """None = proceed with the insert; otherwise the no-insert outcome."""
+        if type(base_version_id) is not int or base_version_id <= 0:
+            raise StudyNoteArtifactNotFoundError("study note not found")
+        base = self._repo.get_artifact_version(base_version_id)
+        current = (
+            self._repo.get_artifact_version(artifact.current_version_id)
+            if artifact.current_version_id is not None
+            else None
+        )
+        if base is None or base.artifact_id != artifact.id or current is None:
+            raise StudyNoteArtifactNotFoundError("study note not found")
+        same_as_current = self._parse_content(current.content_json).model_dump() == content.model_dump()
+        if base.id != current.id:
+            # Replay needs lineage, not just equal content: the save that made
+            # ``current`` was based on the version right before it.
+            if (
+                same_as_current
+                and current.origin == _ORIGIN_MANUAL_EDIT
+                and current.version_number == base.version_number + 1
+            ):
+                return StudyNoteVersion(**{**self._version(artifact, current).__dict__, "edit_result": "replayed"})
+            raise DraftVersionConflictError(current.id, current.version_number)
+        if same_as_current:
+            return StudyNoteVersion(**{**self._version(artifact, current).__dict__, "edit_result": "unchanged"})
+        return None
+
+    def _version(self, artifact, version) -> StudyNoteVersion:
+        content = self._parse_content(version.content_json)
+        sources = self._consistent_sources(artifact.id, content)
+        return StudyNoteVersion(
+            artifact_id=artifact.id,
+            version_id=version.id,
+            version_number=version.version_number,
+            origin=version.origin,
+            content=content,
+            source_screenshot_ids=sources,
+            field_origins=field_origins(
+                self._repo.list_artifact_versions(artifact.id),
+                version.version_number,
+                NOTE_FIELDS,
+                lambda raw: self._history_content(raw, sources),
+            ),
+        )
+
+    def _consistent_sources(self, artifact_id: int, content: StudyNoteResult) -> list[int]:
+        """The authoritative sources, cross-checked against the stored payload.
+
+        A note may have several sources (selection order). The workspace-scoped
+        ``source_reference`` rows are the authority: they must be distinct,
+        every screenshot must belong to this workspace, and the payload's
+        ``references`` must equal them exactly (same ids, same order). Anything
+        else is inconsistent stored data: the generic unavailable error, with no
+        id or content echoed, and nothing repaired.
+        """
+        sources = self._source_ids(artifact_id)
+        if len(set(sources)) != len(sources) or content.references != sources:
+            raise StudyNoteArtifactUnavailableError("study note service unavailable")
+        if any(self._repo.get_screenshot(sid) is None for sid in sources):
+            raise StudyNoteArtifactUnavailableError("study note service unavailable")
+        return sources
+
+    def _history_content(self, raw: str, sources: list[int]) -> dict:
+        """A historical payload for provenance: fully validated, same sources. Raises otherwise."""
+        content = self._parse_content(raw)
+        if content.references != sources:
+            raise StudyNoteArtifactUnavailableError("study note service unavailable")
+        return content.model_dump()
 
     def _study_note(self, artifact_id: int):
         artifact = self._repo.get_artifact(artifact_id)

@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -22,7 +23,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy import event
+from sqlalchemy import event, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -38,8 +39,31 @@ class Workspace(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     # Only sha256(token) is stored; the raw token lives only in the cookie.
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    # Batch 6B: opt-in automatic analysis -> routing -> draft preparation. Never
+    # a consent: each screenshot still needs its own grant, checked at dispatch.
+    auto_prepare: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
+class GlobalCounter(Base):
+    """Deployment-wide usage counters (deployment readiness R5, R8).
+
+    The ONE deliberately unscoped table: it holds no workspace data, only
+    aggregate counts that must span all workspaces (a per-workspace quota alone
+    cannot bound a public app, because anyone can mint a workspace). Keys:
+    ``ai_calls:YYYY-MM-DD`` (UTC day) and ``storage_bytes``. Read and updated
+    only through ``app.services.global_usage_service`` under a row lock.
+    """
+
+    __tablename__ = "global_counter"
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
     )
 
 
@@ -193,6 +217,54 @@ class ConsentRecord(Base):
     granted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Batch 6A (tasks.md 7.1): incremented on EVERY grant or withdrawal. An AI
+    # dispatch records the version it was authorized against; a result is saved
+    # only if the consent is still granted at that same version.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Batch 6A: the AI provider this consent was given for (the user was shown
+    # that provider's disclosure). A grant for the Fake AI ("nothing is sent")
+    # never authorizes sending to a real provider. NULL = recorded before 6A.
+    provider: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Batch 6A (P1-A): the revision of the disclosure the user was shown when
+    # granting (app/ai/disclosure.py). A changed disclosure needs a fresh grant.
+    disclosure_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class AIDispatch(Base):
+    """One authorized hand-off of ONE screenshot's original bytes to the AI adapter.
+
+    Batch 6A (tasks.md 7.1, design D). A row is written, under the workspace
+    write lock and in the same short transaction that re-reads consent, BEFORE
+    the adapter is called; consent changes take the same lock, so the two are
+    totally ordered per workspace. From the moment a row commits, the request is
+    treated as possibly sent and cannot be recalled. ``UNIQUE(operation_id,
+    screenshot_id)`` makes a duplicate worker for the same operation unable to
+    dispatch twice.
+
+    ``state``: ``dispatched`` (may have been sent; still running),
+    ``completed`` (its result was saved, consent unchanged), ``discarded`` (the
+    worker finished without saving a result) or ``interrupted`` (stale-pending
+    recovery failed the operation: the request may have been sent, its outcome
+    is unknown and nothing was saved). No state ever claims "not sent".
+    """
+
+    __tablename__ = "ai_dispatch"
+    __table_args__ = (
+        UniqueConstraint("operation_id", "screenshot_id", name="ai_dispatch_operation_screenshot"),
+        Index("ix_ai_dispatch_workspace_id", "workspace_id"),
+        Index("ix_ai_dispatch_screenshot_state", "screenshot_id", "state"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspace.id"), nullable=False)
+    operation_id: Mapped[int] = mapped_column(ForeignKey("operation.id"), nullable=False)
+    screenshot_id: Mapped[int] = mapped_column(ForeignKey("screenshot.id"), nullable=False)
+    consent_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    dispatched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Operation(Base):
@@ -224,6 +296,42 @@ class Operation(Base):
     )
 
 
+class Approval(Base):
+    """Approval ledger (Batch 5B): one INSERT-only record per approved version.
+
+    Binds the workspace (the only actor identity this app has: there are no
+    user accounts), the artifact and the exact immutable ``artifact_version``.
+    ``version_number`` is informational. ``content_sha256`` is the SHA-256 of
+    the approved version's stored ``content_json``, so a later reader can prove
+    the approved bytes are unchanged. Approval never changes, replaces or adds a
+    version, and records nothing about delivery. ``UNIQUE(artifact_version_id)``
+    makes repeated or concurrent approvals of one version idempotent.
+    """
+
+    __tablename__ = "approval"
+    __table_args__ = (
+        UniqueConstraint("artifact_version_id", name="approval_artifact_version"),
+        Index("ix_approval_workspace_id", "workspace_id"),
+        Index("ix_approval_artifact_id", "artifact_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspace.id"), nullable=False)
+    artifact_id: Mapped[int] = mapped_column(ForeignKey("artifact.id"), nullable=False)
+    artifact_version_id: Mapped[int] = mapped_column(
+        ForeignKey("artifact_version.id"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # JSON list of fields whose uncertainty the user explicitly acknowledged.
+    acknowledged_uncertain_json: Mapped[str] = mapped_column(Text, nullable=False)
+    # JSON list of fields whose value came from AI and was not changed by the user.
+    ai_origin_fields_json: Mapped[str] = mapped_column(Text, nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
 class AppendOnlyViolationError(Exception):
     """Raised on any attempt to UPDATE or DELETE a retained artifact version."""
 
@@ -240,3 +348,14 @@ def _forbid_version_update(mapper, connection, target) -> None:  # noqa: ANN001
 @event.listens_for(ArtifactVersion, "before_delete")
 def _forbid_version_delete(mapper, connection, target) -> None:  # noqa: ANN001
     raise AppendOnlyViolationError("artifact versions are never deleted")
+
+
+@event.listens_for(Approval, "before_update")
+def _forbid_approval_update(mapper, connection, target) -> None:  # noqa: ANN001
+    # The approval ledger is history: a record is never changed.
+    raise AppendOnlyViolationError("approvals are append-only")
+
+
+@event.listens_for(Approval, "before_delete")
+def _forbid_approval_delete(mapper, connection, target) -> None:  # noqa: ANN001
+    raise AppendOnlyViolationError("approvals are never deleted")

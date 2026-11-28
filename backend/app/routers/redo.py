@@ -142,10 +142,10 @@ def _consent_and_operation(session: Session, workspace_id: int, screenshot_ids: 
         return None, _unavailable()
     try:
         return OperationService(session, workspace_id).create_pending("redo"), None
-    except OperationQuotaExceededError:
+    except OperationQuotaExceededError as exc:
         return None, JSONResponse(
             status_code=429,
-            content=_error_body("quota_exceeded", "AI operation quota exceeded"),
+            content=_error_body(exc.code, exc.public_message),
         )
     except OperationServiceUnavailableError:
         return None, _unavailable()

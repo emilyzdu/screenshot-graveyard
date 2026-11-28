@@ -12,7 +12,7 @@ from logging.config import fileConfig
 from pathlib import Path
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
 # Make the backend package importable when alembic runs from backend/.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import config as app_config  # noqa: E402
 from app.db.base import Base  # noqa: E402
 from app.db import models  # noqa: E402,F401  (registers mappers)
+from app.db.url import parse_database_url, redact  # noqa: E402
 
 config = context.config
 
@@ -40,10 +41,11 @@ def _resolve_url() -> str:
     return os.environ.get("DATABASE_URL", app_config.DATABASE_URL)
 
 
-_DB_URL = _resolve_url()
-# Make the resolved URL the effective one for Alembic (alembic.ini carries no
-# real URL/secret).
-config.set_main_option("sqlalchemy.url", _DB_URL)
+# Parsed ONCE and passed to SQLAlchemy as a URL object. It is deliberately NOT
+# written back with `config.set_main_option`: Alembic's ConfigParser treats "%"
+# as interpolation, so a URL-encoded password (e.g. "p%40ss") would fail there.
+# A malformed URL raises a generic error that does not echo the value.
+_DB_URL = parse_database_url(_resolve_url())
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -52,7 +54,7 @@ target_metadata = Base.metadata
 
 
 def _is_sqlite() -> bool:
-    return _DB_URL.startswith("sqlite")
+    return _DB_URL.get_backend_name() == "sqlite"
 
 
 def run_migrations_offline() -> None:
@@ -68,12 +70,16 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-    with connectable.connect() as connection:
+    connectable = create_engine(_DB_URL, poolclass=pool.NullPool)
+    try:
+        connection = connectable.connect()
+    except Exception as exc:
+        # Never let a connection failure print the password: re-raise with the
+        # driver's message redacted and the original traceback suppressed.
+        raise RuntimeError(
+            f"Database connection failed ({type(exc).__name__}): {redact(str(exc), _DB_URL)}"
+        ) from None
+    with connection:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

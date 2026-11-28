@@ -1,3 +1,5 @@
+import { normalizeAnalysisOrigin, normalizeResultProvider, type ResultProvider } from './analysisOrigin';
+
 // Minimal, typed API client for the Screenshot Graveyard backend.
 //
 // All requests are same-origin; the workspace identity travels in an HttpOnly
@@ -108,7 +110,13 @@ export interface ScreenshotAnalysis {
   epitaph: string;
   /** ai_generate | ai_redo | manual_edit */
   epitaphOrigin: string;
+  /**
+   * Batch 6A (P2-E): the provider that generated the current Epitaph version,
+   * or `null` when it was not recorded. Never inferred from the current mode.
+   */
+  epitaphProvider?: ResultProvider;
 }
+
 
 export interface Screenshot {
   screenshotId: number;
@@ -126,7 +134,9 @@ export type ListResult =
   | { ok: true; screenshots: Screenshot[] }
   | { ok: false; error: string };
 
-function isScreenshot(value: unknown): value is Screenshot {
+type RawAnalysis = Omit<ScreenshotAnalysis, 'epitaphOrigin'> & { epitaphOrigin?: unknown };
+
+function isScreenshot(value: unknown): value is Omit<Screenshot, 'analysis'> & { analysis: RawAnalysis | null } {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
   return (
@@ -142,15 +152,14 @@ function isScreenshot(value: unknown): value is Screenshot {
   );
 }
 
-function isAnalysisOrNull(value: unknown): value is ScreenshotAnalysis | null {
+function isAnalysisOrNull(value: unknown): value is RawAnalysis | null {
   if (value === null) return true;
   if (typeof value !== 'object' || value === undefined) return false;
   const a = value as Record<string, unknown>;
   return (
     typeof a.category === 'string' &&
     typeof a.uncertain === 'boolean' &&
-    typeof a.epitaph === 'string' &&
-    typeof a.epitaphOrigin === 'string'
+    typeof a.epitaph === 'string'
   );
 }
 
@@ -186,7 +195,15 @@ export async function listScreenshots(
   if (!raw.every(isScreenshot)) {
     return { ok: false, error: 'Unexpected response shape' };
   }
-  return { ok: true, screenshots: raw as Screenshot[] };
+  const screenshots = raw.map((shot): Screenshot => ({
+    ...shot,
+    analysis: shot.analysis && {
+      ...shot.analysis,
+      epitaphOrigin: normalizeAnalysisOrigin(shot.analysis.epitaphOrigin),
+      epitaphProvider: normalizeResultProvider((shot.analysis as { epitaphProvider?: unknown }).epitaphProvider),
+    },
+  }));
+  return { ok: true, screenshots };
 }
 
 // The authorized bytes endpoint. Returned as a URL for an <img src>; the browser
@@ -284,9 +301,16 @@ export async function uploadScreenshots(
 
 export type LifecycleStatus = 'successful' | 'failed';
 
+/**
+ * `rejected`: the server answered with a 4xx, so the action was not performed.
+ * `unknown`: no usable answer (network error, timeout, 5xx, unreadable or
+ * mismatched body). The server may have committed the change, so callers must
+ * check the authoritative state instead of assuming failure.
+ */
+export type LifecycleOutcome = 'rejected' | 'unknown';
 export type LifecycleResult =
   | { ok: true; screenshotId: number; status: LifecycleStatus; state: ScreenshotState }
-  | { ok: false; error: string };
+  | { ok: false; error: string; outcome: LifecycleOutcome };
 
 async function postLifecycle(
   path: string,
@@ -299,20 +323,29 @@ async function postLifecycle(
       headers: { 'X-Requested-With': 'fetch', Accept: 'application/json' },
       credentials: 'same-origin',
     });
-  } catch {
-    return { ok: false, error: 'Network request failed' };
+  } catch (e) {
+    const aborted = e instanceof DOMException && (e.name === 'AbortError' || e.name === 'TimeoutError');
+    return {
+      ok: false,
+      error: aborted ? 'Request timed out' : 'Network request failed',
+      outcome: 'unknown',
+    };
   }
   if (!response.ok) {
-    return { ok: false, error: `HTTP ${response.status}` };
+    return {
+      ok: false,
+      error: `HTTP ${response.status}`,
+      outcome: response.status >= 400 && response.status < 500 ? 'rejected' : 'unknown',
+    };
   }
   let body: unknown;
   try {
     body = await response.json();
   } catch {
-    return { ok: false, error: 'Invalid JSON response' };
+    return { ok: false, error: 'Invalid JSON response', outcome: 'unknown' };
   }
   if (typeof body !== 'object' || body === null) {
-    return { ok: false, error: 'Unexpected response shape' };
+    return { ok: false, error: 'Unexpected response shape', outcome: 'unknown' };
   }
   const v = body as Record<string, unknown>;
   if (
@@ -320,7 +353,7 @@ async function postLifecycle(
     (v.status !== 'successful' && v.status !== 'failed') ||
     (v.state !== 'active' && v.state !== 'archived')
   ) {
-    return { ok: false, error: 'Unexpected response shape' };
+    return { ok: false, error: 'Unexpected response shape', outcome: 'unknown' };
   }
   return {
     ok: true,

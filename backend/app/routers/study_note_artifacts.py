@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 
 from app.db.session import get_session
+from app.services.draft_versioning import DraftSourceArchivedError, DraftVersionConflictError
 from app.services.study_note_artifact_service import (
     ManualStudyNoteContent,
     StudyNoteArtifactNotFoundError,
@@ -23,6 +24,23 @@ from app.services.study_note_artifact_service import (
 
 class StudyNoteEditBody(BaseModel):
     content: ManualStudyNoteContent
+    # Batch 5A: the version this edit was based on (optimistic concurrency).
+    baseVersionId: StrictInt = Field(gt=0)
+
+
+def conflict_response(exc: DraftVersionConflictError) -> JSONResponse:
+    """409 for a stale edit: nothing was saved; the client must load the latest version."""
+    return JSONResponse(status_code=409, content={"error": {
+        "code": "version_conflict",
+        "message": "This draft changed since you started editing. Nothing was saved.",
+        "currentVersionId": exc.current_version_id,
+        "currentVersionNumber": exc.current_version_number,
+    }})
+
+
+def archived_response() -> JSONResponse:
+    return JSONResponse(status_code=409, content=_error_body(
+        "screenshot_archived", "Resurrect the source screenshot before editing its draft"))
 
 
 def _error_body(code: str, message: str) -> dict:
@@ -51,6 +69,8 @@ def _version_dict(version) -> dict:
         "origin": version.origin,
         "content": version.content.model_dump(),
         "sourceScreenshotIds": version.source_screenshot_ids,
+        "fieldOrigins": version.field_origins,
+        **({"editResult": version.edit_result} if version.edit_result else {}),
     }
 
 
@@ -110,9 +130,13 @@ def build_study_note_artifacts_router() -> APIRouter:
         session = get_session()
         try:
             version = StudyNoteArtifactService(session, workspace_id).save_edit(
-                artifact_id, body.content.model_dump()
+                artifact_id, body.content.model_dump(), base_version_id=body.baseVersionId
             )
             return _version_dict(version)
+        except DraftVersionConflictError as exc:
+            return conflict_response(exc)
+        except DraftSourceArchivedError:
+            return archived_response()
         except StudyNoteEditValidationError:
             return JSONResponse(status_code=400, content=_error_body("invalid_content", "Invalid study note content"))
         except StudyNoteArtifactNotFoundError:

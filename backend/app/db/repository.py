@@ -118,6 +118,19 @@ class WorkspaceRepository:
         stmt = select(models.Workspace).where(models.Workspace.id == self._workspace_id)
         return self._session.scalars(stmt).one_or_none()
 
+    def get_auto_prepare(self) -> bool:
+        """Batch 6B: this workspace's opt-in automation preference (False if absent)."""
+        ws = self.get_workspace()
+        return bool(ws is not None and ws.auto_prepare)
+
+    def set_auto_prepare(self, enabled: bool) -> bool:
+        """Set the preference (caller commits). Returns False if the workspace is gone."""
+        ws = self.get_workspace()
+        if ws is None:
+            return False
+        ws.auto_prepare = bool(enabled)
+        return True
+
     def lock_workspace(self) -> models.Workspace | None:
         """Acquire a real per-workspace write lock to serialize critical sections.
 
@@ -214,6 +227,33 @@ class WorkspaceRepository:
 
     def get_screenshot(self, screenshot_id: int) -> models.Screenshot | None:
         return self._get_owned(models.Screenshot, screenshot_id)
+
+    def get_screenshot_locked(self, screenshot_id: int) -> models.Screenshot | None:
+        """Fresh, workspace-scoped read for a final check inside a locked section.
+
+        Call only after `lock_workspace()` in the same transaction.
+        `populate_existing` bypasses the identity map, so a value cached by an
+        earlier read in this session (for example `state == "active"`) is
+        replaced by the committed row.
+
+        * SQLite: the caller already holds the database write lock, so no other
+          connection can commit a change to this row until the caller's
+          transaction ends; this read sees every earlier commit.
+        * PostgreSQL: `FOR UPDATE` row-locks the screenshot, waiting for any
+          in-flight writer (e.g. Safe Burial's UPDATE) and then reading its
+          committed result. Lock order is workspace row -> screenshot row; no
+          path takes them in the opposite order.
+        """
+        stmt = (
+            select(models.Screenshot)
+            .where(
+                models.Screenshot.id == screenshot_id,
+                models.Screenshot.workspace_id == self._workspace_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return self._session.scalars(stmt).one_or_none()
 
     def list_screenshots(self, state: str | None = None) -> list[models.Screenshot]:
         stmt = select(models.Screenshot).where(
@@ -376,10 +416,87 @@ class WorkspaceRepository:
         ).order_by(models.SourceReference.id)
         return list(self._session.scalars(stmt))
 
+    # ---------------------------------- approval ---------------------------------
+
+    def get_artifact_locked(self, artifact_id: int) -> models.Artifact | None:
+        """Fresh, workspace-scoped artifact read for a locked section.
+
+        Call only after `lock_workspace()`. `populate_existing` replaces any
+        cached `current_version_id`, so the current-version check sees every
+        earlier commit (same reasoning as `get_screenshot_locked`).
+        """
+        stmt = (
+            select(models.Artifact)
+            .where(models.Artifact.id == artifact_id, models.Artifact.workspace_id == self._workspace_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return self._session.scalars(stmt).one_or_none()
+
+    def read_current_version_id(self, artifact_id: int) -> int | None:
+        """The committed current-version pointer of an OWNED artifact, read fresh.
+
+        A column-only SELECT never comes from the ORM identity map, so each call
+        observes the database as of that statement.
+        """
+        stmt = select(models.Artifact.current_version_id).where(
+            models.Artifact.id == artifact_id, models.Artifact.workspace_id == self._workspace_id
+        )
+        return self._session.execute(stmt).scalar_one_or_none()
+
+    def get_approval_for_version(self, version_id: int) -> models.Approval | None:
+        stmt = select(models.Approval).where(
+            models.Approval.workspace_id == self._workspace_id,
+            models.Approval.artifact_version_id == version_id,
+        )
+        return self._session.scalars(stmt).one_or_none()
+
+    def list_approvals(self, artifact_id: int) -> list[models.Approval]:
+        """Every approval of an OWNED artifact, oldest first."""
+        self._require_owned(models.Artifact, artifact_id)
+        stmt = select(models.Approval).where(
+            models.Approval.workspace_id == self._workspace_id,
+            models.Approval.artifact_id == artifact_id,
+        ).order_by(models.Approval.id)
+        return list(self._session.scalars(stmt))
+
+    def add_approval(
+        self,
+        *,
+        artifact_id: int,
+        artifact_version_id: int,
+        version_number: int,
+        content_sha256: str,
+        acknowledged_uncertain_json: str,
+        ai_origin_fields_json: str,
+    ) -> models.Approval:
+        """INSERT one approval. The version must belong to an owned artifact."""
+        self._require_owned(models.Artifact, artifact_id)
+        version = self._require_owned(models.ArtifactVersion, artifact_version_id)
+        if version.artifact_id != artifact_id:
+            raise CrossWorkspaceError()
+        approval = models.Approval(
+            workspace_id=self._workspace_id,
+            artifact_id=artifact_id,
+            artifact_version_id=artifact_version_id,
+            version_number=version_number,
+            content_sha256=content_sha256,
+            acknowledged_uncertain_json=acknowledged_uncertain_json,
+            ai_origin_fields_json=ai_origin_fields_json,
+        )
+        self._session.add(approval)
+        self._session.flush()
+        return approval
+
     # ----------------------------- consent_record ----------------------------
 
     def set_consent(
-        self, *, screenshot_id: int, granted: bool
+        self,
+        *,
+        screenshot_id: int,
+        granted: bool,
+        provider: str | None = None,
+        disclosure_revision: str | None = None,
     ) -> models.ConsentRecord:
         self._require_owned(models.Screenshot, screenshot_id)
         stmt = select(models.ConsentRecord).where(
@@ -393,11 +510,20 @@ class WorkspaceRepository:
                 screenshot_id=screenshot_id,
                 granted=granted,
                 granted_at=_utcnow() if granted else None,
+                provider=provider if granted else None,
+                disclosure_revision=disclosure_revision if granted else None,
             )
             self._session.add(record)
         else:
             record.granted = granted
             record.granted_at = _utcnow() if granted else None
+            if granted:
+                record.provider = provider
+                record.disclosure_revision = disclosure_revision
+            # Every grant or withdrawal is a new consent version (Batch 6A), so a
+            # result authorized against an older version is never saved, even
+            # after a withdraw-then-regrant.
+            record.version = (record.version or 0) + 1
         self._session.flush()
         return record
 
@@ -409,10 +535,73 @@ class WorkspaceRepository:
         )
         return self._session.scalars(stmt).one_or_none()
 
+    def get_consents_fresh(self, screenshot_ids: list[int]) -> dict[int, models.ConsentRecord | None]:
+        """Consent for ALL given OWNED screenshots in one read, bypassing the identity map.
+
+        Call after `lock_workspace()` in the same transaction (Batch 6A): every
+        consent change takes that lock too, so this read sees every earlier
+        consent commit and no later one can interleave. Any missing or foreign
+        screenshot raises the generic CrossWorkspaceError (non-disclosing).
+        """
+        ids = list(dict.fromkeys(screenshot_ids))
+        if not ids:
+            raise CrossWorkspaceError()
+        owned = set(
+            self._session.scalars(
+                select(models.Screenshot.id).where(
+                    models.Screenshot.workspace_id == self._workspace_id,
+                    models.Screenshot.id.in_(ids),
+                )
+            )
+        )
+        if owned != set(ids):
+            raise CrossWorkspaceError()
+        stmt = (
+            select(models.ConsentRecord)
+            .where(
+                models.ConsentRecord.workspace_id == self._workspace_id,
+                models.ConsentRecord.screenshot_id.in_(ids),
+            )
+            .execution_options(populate_existing=True)
+        )
+        found = {r.screenshot_id: r for r in self._session.scalars(stmt)}
+        return {sid: found.get(sid) for sid in ids}
+
+    # ------------------------------- ai_dispatch ------------------------------
+    def add_dispatch(self, *, operation_id: int, screenshot_id: int, consent_version: int) -> models.AIDispatch:
+        self._require_owned(models.Operation, operation_id)
+        row = models.AIDispatch(
+            workspace_id=self._workspace_id,
+            operation_id=operation_id,
+            screenshot_id=screenshot_id,
+            consent_version=consent_version,
+            state="dispatched",
+        )
+        self._session.add(row)
+        self._session.flush()
+        return row
+
+    def list_dispatches(self, operation_id: int) -> list[models.AIDispatch]:
+        stmt = (
+            select(models.AIDispatch)
+            .where(
+                models.AIDispatch.workspace_id == self._workspace_id,
+                models.AIDispatch.operation_id == operation_id,
+            )
+            .order_by(models.AIDispatch.id)
+            .execution_options(populate_existing=True)
+        )
+        return list(self._session.scalars(stmt))
+
     # ------------------------------- operation -------------------------------
 
     def create_operation(
-        self, *, kind: str, status: str = "pending", artifact_id: int | None = None
+        self,
+        *,
+        kind: str,
+        status: str = "pending",
+        artifact_id: int | None = None,
+        idempotency_key: str | None = None,
     ) -> models.Operation:
         if status not in OPERATION_STATUSES:
             raise InvalidOperationStatusError("invalid operation status")
@@ -425,6 +614,7 @@ class WorkspaceRepository:
             kind=kind,
             status=status,
             artifact_id=artifact_id,
+            idempotency_key=idempotency_key,
         )
         self._session.add(op)
         self._session.flush()
@@ -432,6 +622,23 @@ class WorkspaceRepository:
 
     def get_operation(self, operation_id: int) -> models.Operation | None:
         return self._get_owned(models.Operation, operation_id)
+
+    def latest_operation_with_key_prefix(self, prefix: str) -> models.Operation | None:
+        """Newest owned operation whose idempotency key starts with ``prefix``.
+
+        Workspace-scoped like every query here; the prefix is matched literally
+        (LIKE wildcards in it are escaped).
+        """
+        stmt = (
+            select(models.Operation)
+            .where(
+                models.Operation.workspace_id == self._workspace_id,
+                models.Operation.idempotency_key.startswith(prefix, autoescape=True),
+            )
+            .order_by(models.Operation.id.desc())
+            .limit(1)
+        )
+        return self._session.scalars(stmt).first()
 
     def set_operation_status(
         self, operation_id: int, status: str, error_detail: str | None = None
@@ -473,14 +680,14 @@ class WorkspaceRepository:
         return int(self._session.scalar(stmt) or 0)
 
     def count_ai_operations(self) -> int:
-        """Number of AI operations (classify/study_note/redo) for this workspace.
+        """Number of AI operations (classify/study_note/redo/event_draft) for this workspace.
 
         Counts the operation rows that represent metered AI calls, used to
         enforce the per-workspace AI-call quota.
         """
         from sqlalchemy import func
 
-        ai_kinds = ("classify", "study_note", "redo")
+        ai_kinds = ("classify", "study_note", "redo", "event_draft")
         stmt = select(func.count()).select_from(models.Operation).where(
             models.Operation.workspace_id == self._workspace_id,
             models.Operation.kind.in_(ai_kinds),

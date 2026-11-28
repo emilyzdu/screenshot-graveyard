@@ -19,6 +19,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 EXPECTED_TABLES = {
     "workspace", "content_blob", "screenshot", "artifact",
     "artifact_version", "source_reference", "consent_record", "operation",
+    "approval",  # Batch 5B
 }
 
 
@@ -51,6 +52,11 @@ def test_migration_creates_full_schema_from_zero(tmp_path, monkeypatch):
     for table in EXPECTED_TABLES - {"workspace"}:
         flat = {c for i in insp.get_indexes(table) for c in i["column_names"]}
         assert "workspace_id" in flat, f"{table} missing workspace_id index after migration"
+
+    # Batch 5B: one approval per version, enforced by the database.
+    appr_uq = {tuple(u["column_names"]) for u in insp.get_unique_constraints("approval")}
+    appr_uq |= {tuple(i["column_names"]) for i in insp.get_indexes("approval") if i.get("unique")}
+    assert ("artifact_version_id",) in appr_uq
 
     # Downgrade back to base should remove the tables.
     command.downgrade(cfg, "base")

@@ -60,6 +60,7 @@ from app.services.study_note_artifact_service import (
 from app.services.study_note_service import StudyNoteService
 from app.services.vault_service import VaultService
 from app.storage.file_store import FileStore
+from tests.consent_helpers import grant_body, current_disclosure
 
 JOIN_TIMEOUT = 30
 
@@ -218,7 +219,7 @@ def barrier_at(monkeypatch, cls, name, barrier):
 
 def _grant_all(s, wid, ids):
     for sid in ids:
-        ConsentService(s, wid).record_consent(sid, True)
+        ConsentService(s, wid).record_consent(sid, True, disclosure=current_disclosure())
 
 
 def make_note(env, wid, n=3):
@@ -876,10 +877,20 @@ def test_analysis_redo_and_edit_under_contention_keep_both_artifacts_in_step(env
                 lambda: redo_analysis(env, env.a, sid, op, adapter, "brief"),
                 lambda: edit_analysis(env, env.a, sid),
             )
-        assert redo_out.operation.status == "successful"
         class_o, epi_o = _pair_origins(env, cid, eid)
         assert class_o == epi_o                                    # same order on BOTH artifacts
-        assert sorted(o for _n, o in class_o[1:]) == ["ai_redo", "manual_edit"]
+        # Two valid commit orders; which one wins depends on scheduling, not on a bug.
+        if redo_out.operation.status == "successful":
+            # The redo committed first; the manual edit then lands on top of it.
+            assert class_o == [(1, "ai_generate"), (2, "ai_redo"), (3, "manual_edit")]
+        else:
+            # The manual edit committed first; the redo's persistence guard rejects
+            # the now-stale AI result, so nothing from the AI is persisted.
+            assert redo_out.operation.status == "failed"
+            assert (redo_out.operation.error_detail or "").startswith("Superseded")
+            assert class_o == [(1, "ai_generate"), (2, "manual_edit")]
+        # Either way the user's manual edit is never discarded and is current.
+        assert class_o[-1][1] == "manual_edit"
         assert_valid_pointer(env, cid)
         assert_valid_pointer(env, eid)
         assert len(adapter.class_calls) == 1
@@ -986,7 +997,7 @@ def _http_note(c, n=2):
     for i in range(n):
         r = c.post("/api/screenshots", headers=HDRS, files=[("files", (f"{i}.png", png((i * 30, 5, 5)), "image/png"))])
         sid = r.json()["results"][0]["screenshotId"]
-        c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+        c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
         ids.append(sid)
     op = c.post("/api/study-notes", headers=HDRS, json={"screenshotIds": ids}).json()["operationId"]
     assert c.get(f"/api/operations/{op}").json()["status"] == "successful"
@@ -999,13 +1010,14 @@ SAFE_503 = {"error": {"code": "service_unavailable", "message": "Service tempora
 def test_http_note_edit_reports_a_generic_503_when_retries_are_exhausted(http, monkeypatch):
     c, eng, _ = http
     aid, _ = _http_note(c)
+    base = c.get(f"/api/study-notes/{aid}").json()["versionId"]
     with stale_max(monkeypatch, [aid], times=10**6):
-        r = c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"content": {"topic": "PRIVATE-TOPIC"}})
+        r = c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"baseVersionId": base, "content": {"topic": "PRIVATE-TOPIC"}})
     assert r.status_code == 503 and r.json() == SAFE_503
     assert "PRIVATE-TOPIC" not in r.text and "UNIQUE" not in r.text
     versions_now = c.get(f"/api/study-notes/{aid}/versions").json()["versions"]
     assert [(v["versionNumber"], v["isCurrent"]) for v in versions_now] == [(1, True)]
-    ok = c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"content": {"topic": "After"}})
+    ok = c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"baseVersionId": base, "content": {"topic": "After"}})
     assert ok.status_code == 200 and ok.json()["versionNumber"] == 2        # service recovered
 
 
@@ -1013,7 +1025,7 @@ def test_http_analysis_edit_reports_a_generic_503_and_changes_nothing(http, monk
     c, eng, _ = http
     r = c.post("/api/screenshots", headers=HDRS, files=[("files", ("a.png", png((9, 9, 9)), "image/png"))])
     sid = r.json()["results"][0]["screenshotId"]
-    c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+    c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
     op = c.post(f"/api/screenshots/{sid}/classify", headers=HDRS).json()["operationId"]
     assert c.get(f"/api/operations/{op}").json()["status"] == "successful"
     with Session(eng) as s:

@@ -6,4 +6,6 @@ import { beforeEach } from 'vitest';
 beforeEach(async () => {
   const { resetReviveCoordinator } = await import('../ai/reviveCoordinator');
   resetReviveCoordinator();
+  const { resetConsentWithdrawals } = await import('../ai/useConsent');
+  resetConsentWithdrawals();
 });

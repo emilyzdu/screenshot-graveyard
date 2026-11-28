@@ -1,0 +1,767 @@
+import '@fontsource-variable/inter';
+import '@fontsource/cormorant-garamond/600.css';
+import '@fontsource/cormorant-garamond/700.css';
+import '../ui/theme.css';
+import '../ui/components.css';
+import './shell.css';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  archiveScreenshot,
+  getWorkspace,
+  imageUrl,
+  listScreenshots,
+  restoreScreenshot,
+  uploadScreenshots,
+  type LifecycleResult,
+  type ListResult,
+  type Screenshot,
+} from '../api/client';
+import { CRYPT_GALLERY_NOTE } from '../ai/messages';
+import { useProviderStatus } from '../ai/PrivacyNotice';
+import { RevivePanel } from './RevivePanel';
+import { AutoPilot, AUTO_READ_TIMEOUT_MS } from './AutoPilot';
+import { AutomationToggle } from './AutomationToggle';
+import { useAutomation } from './useAutomation';
+import { getAutoProcess, type AutoProcessState } from '../api/ai';
+import { boundedFetch } from '../api/boundedFetch';
+import { ArchivedDrafts } from './ArchivedDrafts';
+import { LiveAssistant } from './LiveAssistant';
+import { LIVE_ACTIONS, epitaphProvenanceLabel, type ActionChoice } from './nextAction';
+import { useValidatedAnalysis } from './useValidatedAnalysis';
+import { createAnalysisAuthority, currentSuggestionRule } from './sharedAnalysis';
+import { Button } from '../ui/primitives';
+import { ShotArt } from '../ui/ShotArt';
+import { Drawer } from './DetailDrawer';
+import { AppHeader, NavTabs } from './Header';
+import { ScreenshotGallery, UploadDropZone, WorkspaceHeading } from './Workspace';
+import type { ShotVM, ViewId } from './types';
+
+type GalleryState =
+  | { phase: 'loading' }
+  | { phase: 'error'; message: string }
+  | { phase: 'ready'; screenshots: Screenshot[] };
+
+type Notice = { error: boolean; text: string };
+type Lifecycle = 'archive' | 'restore';
+/** `session` identifies the drawer instance that started the action (null for Crypt cards). */
+type Pending = { id: number; kind: Lifecycle; session: number | null } | null;
+/** An action whose outcome we could not confirm. The server may or may not have committed it. */
+type Uncertain = { id: number; kind: Lifecycle; session: number | null; checking: boolean; note: string };
+type Detail = { id: string; opener: HTMLElement; session: number };
+type Verdict = { t: 'confirmed' } | { t: 'failed'; text: string } | { t: 'unknown' };
+
+/** Upper bound for one archive/restore request before we stop waiting and reconcile. */
+export const LIFECYCLE_TIMEOUT_MS = 15_000;
+const LABEL: Record<Lifecycle, string> = { archive: 'Safe Burial', restore: 'Resurrection' };
+const EXPECTED: Record<Lifecycle, 'archived' | 'active'> = { archive: 'archived', restore: 'active' };
+
+/** Upper bound for one lifecycle status read (a gallery GET) before it is treated as unresolved. */
+export const STATUS_CHECK_TIMEOUT_MS = 10_000;
+
+/** Cancel callbacks of requests still in flight, so unmounting clears every timer and aborts every fetch. */
+type Registry = Set<() => void>;
+
+/**
+ * Run one request with a bounded wait. On timeout the fetch is aborted and
+ * `timedOut` is returned. The timer is always cleared once the request settles,
+ * and a late result after the timeout is discarded (the promise settles once).
+ */
+function bounded<T>(
+  registry: Registry,
+  ms: number,
+  run: (fetchImpl: typeof fetch) => Promise<T>,
+  timedOut: T,
+  failed: T,
+): Promise<T> {
+  const controller = new AbortController();
+  const withSignal: typeof fetch = (input, init) => fetch(input, { ...init, signal: controller.signal });
+  return new Promise<T>((resolve) => {
+    const cancel = () => {
+      clearTimeout(timer);
+      controller.abort();
+      registry.delete(cancel);
+    };
+    const settle = (value: T, abort: boolean) => {
+      clearTimeout(timer);
+      registry.delete(cancel);
+      if (abort) controller.abort();
+      resolve(value);
+    };
+    const timer = setTimeout(() => settle(timedOut, true), ms);
+    registry.add(cancel);
+    run(withSignal).then(
+      (value) => settle(value, false),
+      () => settle(failed, false),
+    );
+  });
+}
+
+/**
+ * One POST with a bounded wait. A timeout is an UNRESOLVED outcome, never a
+ * failure: the server may still commit the change after we stop waiting.
+ */
+function postLifecycle(registry: Registry, id: number, kind: Lifecycle): Promise<LifecycleResult> {
+  return bounded<LifecycleResult>(
+    registry,
+    LIFECYCLE_TIMEOUT_MS,
+    (f) => (kind === 'archive' ? archiveScreenshot(id, f) : restoreScreenshot(id, f)),
+    { ok: false, error: 'Request timed out', outcome: 'unknown' },
+    { ok: false, error: 'Network request failed', outcome: 'unknown' },
+  );
+}
+
+/**
+ * A gallery read and the ticket it was issued with. Freshness is NOT captured
+ * here: a caller that decides something from `result` must call `isCurrent(ticket)`
+ * synchronously at the moment of the decision, because a newer read or a
+ * confirmed change can be applied between this read resolving and the caller
+ * resuming after its `await`.
+ */
+type GalleryRead = { result: ListResult; ticket: number };
+
+/**
+ * Decide what a lifecycle response proves. Only a matching, explicit answer is
+ * treated as success or failure; anything else is unknown and must be reconciled.
+ */
+function judge(result: LifecycleResult, id: number, kind: Lifecycle): Verdict {
+  if (!result.ok) {
+    return result.outcome === 'rejected'
+      ? { t: 'failed', text: `${LABEL[kind]} did not complete (${result.error}). Nothing was changed.` }
+      : { t: 'unknown' };
+  }
+  if (result.screenshotId !== id) return { t: 'unknown' };
+  if (result.status === 'successful' && result.state === EXPECTED[kind]) return { t: 'confirmed' };
+  if (result.status === 'failed' && result.state === (kind === 'archive' ? 'active' : 'archived')) {
+    return {
+      t: 'failed',
+      text:
+        kind === 'restore'
+          ? 'Resurrection failed an integrity check. The screenshot stayed in The Crypt.'
+          : 'Safe Burial did not complete. The screenshot stayed in your Workspace.',
+    };
+  }
+  return { t: 'unknown' };
+}
+
+function galleryState(result: ListResult): GalleryState {
+  return result.ok
+    ? { phase: 'ready', screenshots: result.screenshots }
+    : { phase: 'error', message: `Could not load screenshots. ${result.error}` };
+}
+
+function toShot(
+  screenshot: Screenshot,
+  choice?: ActionChoice,
+  summary = screenshot.analysis,
+  suggestionLabel?: string,
+): ShotVM {
+  const uploaded = Date.parse(screenshot.uploadedAt);
+  const bytes = screenshot.byteSize;
+  const state = screenshot.state === 'archived' ? 'Archived' : screenshot.analysis ? 'Revived' : 'Ghost';
+  return {
+    id: String(screenshot.screenshotId),
+    title: screenshot.originalFilename || `Screenshot #${screenshot.screenshotId}`,
+    savedLabel: Number.isFinite(uploaded) ? new Date(uploaded).toLocaleDateString() : 'Date unavailable',
+    savedDaysAgo: Number.isFinite(uploaded) ? Math.max(0, Math.floor((Date.now() - uploaded) / 86_400_000)) : 0,
+    sizeLabel: bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`,
+    art: 'image',
+    topic: 'other',
+    imageSrc: imageUrl(screenshot.screenshotId),
+    statusLabel: screenshot.isDuplicate ? `${state} · Duplicate` : state,
+    ...(summary && screenshot.state === 'active'
+      ? {
+          analysisSummary: {
+            category: summary.category,
+            epitaph: summary.epitaph,
+            uncertain: summary.uncertain,
+            provenance: epitaphProvenanceLabel(summary.epitaphOrigin, summary.epitaphProvider ?? null),
+          },
+          ruleSuggestionLabel: suggestionLabel,
+          chosenLabel: choice ? LIVE_ACTIONS[choice.action].label : undefined,
+        }
+      : {}),
+  };
+}
+
+export default function LiveWorkspace() {
+  const [gallery, setGallery] = useState<GalleryState>({ phase: 'loading' });
+  const [attempt, setAttempt] = useState(0);
+  const [view, setView] = useState<ViewId>('workspace');
+  const [uploading, setUploading] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [detail, setDetailState] = useState<Detail | null>(null);
+  const [pending, setPending] = useState<Pending>(null);
+  const [uncertain, setUncertain] = useState<Record<number, Uncertain>>({});
+  const [drawerMsg, setDrawerMsg] = useState<{ session: number; text: string } | null>(null);
+  const uploadInFlight = useRef(false);
+  // Read-only provider check (GET /api/ai/provider-mode). Revive is offered only in fake mode.
+  const provider = useProviderStatus();
+  // Batch 6B: opt-in automatic preparation (server preference; unknown = off).
+  const automation = useAutomation(gallery.phase === 'ready');
+  const [autoStates, setAutoStates] = useState<Record<number, AutoProcessState>>({});
+  const [autoEpochs, setAutoEpochs] = useState<Record<number, number>>({});
+  const [consentSignal, setConsentSignal] = useState(0);
+  const putAutoState = useCallback((st: AutoProcessState) => {
+    setAutoStates((cur) => ({ ...cur, [st.screenshotId]: st }));
+  }, []);
+  // Batch 3B: selection (Workspace view), the user's chosen next action per
+  // screenshot (transient: this page only, never sent), and the assistant panel.
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [choices, setChoices] = useState<Record<number, ActionChoice>>({});
+  // One shared, screenshot-scoped authority for validated analyses: the
+  // assistant's read and the Revive drawer's read both publish to it, newest
+  // request wins. Lives as long as this workspace view (drawer close keeps it).
+  const [analysisAuthority] = useState(createAnalysisAuthority);
+  const [assistantCollapsed, setAssistantCollapsed] = useState(
+    () => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 899px)').matches,
+  );
+  const lifecycleInFlight = useRef(false);
+  const uncertainRef = useRef<Record<number, Uncertain>>({});
+  const detailRef = useRef<Detail | null>(null);
+  const sessionCounter = useRef(0);
+  // Gallery refresh sequencing. Every list request takes a ticket; a response is
+  // applied only if its ticket is newer than the last applied one, so a delayed
+  // older response can never overwrite newer authoritative state.
+  const ticketCounter = useRef(0);
+  const appliedTicket = useRef(0);
+  const inflight = useRef<Registry>(new Set());
+
+  // Mount generation. Async continuations capture it and stop (no state
+  // updates, no new requests) once it no longer matches `liveGeneration`.
+  const generationCounter = useRef(0);
+  const liveGeneration = useRef<number | null>(null);
+  useEffect(() => {
+    const registry = inflight.current;
+    liveGeneration.current = ++generationCounter.current;
+    return () => {
+      // Mark inactive FIRST: aborting below settles pending requests, and their
+      // continuations must already see this mount as gone.
+      liveGeneration.current = null;
+      [...registry].forEach((cancel) => cancel());
+    };
+  }, []);
+  /** Snapshot the current mount; the returned check is false after unmount (or a later remount). */
+  const captureLive = () => {
+    const generation = liveGeneration.current;
+    return () => generation !== null && liveGeneration.current === generation;
+  };
+
+  const setDetail = (next: Detail | null) => {
+    detailRef.current = next;
+    setDetailState(next);
+  };
+  const putUncertain = (id: number, value: Uncertain | null) => {
+    const next = { ...uncertainRef.current };
+    if (value) next[id] = value;
+    else delete next[id];
+    uncertainRef.current = next;
+    setUncertain(next);
+  };
+
+  /**
+   * The single path for gallery list requests. A response is applied only if its
+   * ticket is newer than everything already applied, and only while this mount
+   * is live. Returns the ticket so a caller can re-check freshness with
+   * `isCurrent` at its own decision point. `timeoutMs` bounds the read.
+   */
+  const refreshGallery = useCallback(async (timeoutMs?: number): Promise<GalleryRead> => {
+    const ticket = ++ticketCounter.current;
+    const generation = liveGeneration.current;
+    const result =
+      timeoutMs === undefined
+        ? await listScreenshots()
+        : await bounded<ListResult>(
+            inflight.current,
+            timeoutMs,
+            (f) => listScreenshots(f),
+            { ok: false, error: 'Request timed out' },
+            { ok: false, error: 'Network request failed' },
+          );
+    const live = generation !== null && liveGeneration.current === generation;
+    if (live && result.ok && ticket > appliedTicket.current) {
+      appliedTicket.current = ticket;
+      setGallery({ phase: 'ready', screenshots: result.screenshots });
+    }
+    return { result, ticket };
+  }, []);
+  /** True only if `ticket` is the most recently applied gallery state (nothing newer applied since). */
+  const isCurrent = (ticket: number) => ticket === appliedTicket.current;
+
+  /** Reflect a server-confirmed state change; invalidates any list request issued before it. */
+  const applyConfirmed = (id: number, state: 'active' | 'archived') => {
+    appliedTicket.current = ++ticketCounter.current;
+    setGallery((g) =>
+      g.phase === 'ready'
+        ? { phase: 'ready', screenshots: g.screenshots.map((s) => (s.screenshotId === id ? { ...s, state } : s)) }
+        : g,
+    );
+  };
+
+  useEffect(() => {
+    let active = true;
+    // Skip the discarded setup in React Strict Mode before minting a cookie.
+    void Promise.resolve().then(async () => {
+      if (!active) return;
+      const workspace = await getWorkspace();
+      if (!active) return;
+      if (!workspace.ok || !workspace.active) {
+        setGallery({
+          phase: 'error',
+          message: workspace.ok ? 'Could not start your workspace.' : `Could not start your workspace. ${workspace.error}`,
+        });
+        return;
+      }
+      const { result } = await refreshGallery();
+      if (active && !result.ok) setGallery(galleryState(result));
+    });
+    return () => { active = false; };
+  }, [attempt, refreshGallery]);
+
+  const upload = async (files: File[]) => {
+    if (gallery.phase !== 'ready' || uploadInFlight.current) return;
+    uploadInFlight.current = true;
+    setUploading(true);
+    setNotice(null);
+    try {
+      const result = await uploadScreenshots(files);
+      if (!result.ok) {
+        setNotice({ error: true, text: `Upload failed. ${result.error}` });
+        return;
+      }
+      const saved = `Saved ${result.accepted} screenshot${result.accepted === 1 ? '' : 's'}.`;
+      // Batch 6B: with automation on, one new screenshot opens straight to its
+      // consent step. Opening only reads; nothing is sent until the user allows it.
+      const single = result.accepted === 1 ? result.results.find((r) => r.status === 'accepted')?.screenshotId ?? null : null;
+      const rejected = result.results
+        .filter((file) => file.status === 'rejected')
+        .map((file) => `${file.filename}: ${file.error ?? 'Could not save this file.'}`);
+      let refreshFailed = false;
+      if (result.accepted > 0) refreshFailed = !(await refreshGallery()).result.ok;
+      setNotice({
+        error: rejected.length > 0 || refreshFailed,
+        text: [saved, ...rejected, ...(refreshFailed ? ['Could not refresh the list. Reload to see it.'] : [])].join(' '),
+      });
+      if (single !== null && !refreshFailed && automation.enabled && detailRef.current === null) {
+        const opener = document.getElementById('sg-main') ?? document.body;
+        setDrawerMsg(null);
+        setDetail({ id: String(single), opener, session: ++sessionCounter.current });
+      }
+    } finally {
+      uploadInFlight.current = false;
+      setUploading(false);
+    }
+  };
+
+  /** Report to the drawer that started the action if it is still open, otherwise to the page. */
+  const report = (session: number | null, text: string, error: boolean) => {
+    if (session !== null && detailRef.current?.session === session) setDrawerMsg({ session, text });
+    else setNotice({ error, text });
+  };
+
+  /** Success for exactly the action that started it: never closes a different drawer. */
+  const finishConfirmed = (id: number, kind: Lifecycle, session: number | null) => {
+    putUncertain(id, null);
+    applyConfirmed(id, EXPECTED[kind]);
+    setNotice({
+      error: false,
+      text:
+        kind === 'archive'
+          ? 'Moved to The Crypt. Your original is kept safe and can be resurrected any time.'
+          : 'Resurrected. The screenshot is back in your Workspace.',
+    });
+    if (session !== null && detailRef.current?.session === session) {
+      setDetail(null);
+      setDrawerMsg(null);
+      requestAnimationFrame(() => document.getElementById('sg-main')?.focus());
+    }
+    void refreshGallery();
+  };
+
+  /**
+   * Ask the server what the screenshot's state really is. Never sends a POST.
+   * Only a read that is still authoritative may decide anything. An unchanged
+   * state is NOT proof that the earlier request failed: it may still commit, so
+   * the action stays blocked until a read shows the expected state.
+   */
+  const reconcile = async (id: number, kind: Lifecycle, session: number | null) => {
+    const live = captureLive();
+    if (!live()) return;
+    const base = uncertainRef.current[id] ?? { id, kind, session, checking: true, note: '' };
+    putUncertain(id, { ...base, checking: true });
+    const { result, ticket } = await refreshGallery(STATUS_CHECK_TIMEOUT_MS);
+    // No await below this line: the liveness and freshness checks and the
+    // decision that follows them run in one synchronous step.
+    if (!live()) return;
+    if (!result.ok) {
+      const timedOut = /timed out/i.test(result.error);
+      putUncertain(id, {
+        ...base,
+        checking: false,
+        note: timedOut
+          ? ' The status check timed out. Check status again in a moment.'
+          : ' The status check also failed. Check status again in a moment.',
+      });
+      return;
+    }
+    if (!isCurrent(ticket)) {
+      // Superseded: either never applied, or a newer read / confirmed change was
+      // applied after it. It must not decide archive or restore outcomes.
+      putUncertain(id, { ...base, checking: false, note: ' A newer refresh replaced this check. Check status again.' });
+      return;
+    }
+    const current = result.screenshots.find((s) => s.screenshotId === id);
+    if (!current) {
+      putUncertain(id, null);
+      setNotice({ error: true, text: `${LABEL[kind]} could not be confirmed, and the screenshot is no longer in your workspace.` });
+      return;
+    }
+    if (current.state === EXPECTED[kind]) {
+      finishConfirmed(id, kind, session);
+      return;
+    }
+    putUncertain(id, {
+      ...base,
+      checking: false,
+      note: ' The server still shows the previous state, but the request may complete later. Check status again, or reload the page to start from the server\'s current state.',
+    });
+  };
+
+  // Safe Burial / Resurrection. The server is the only thing that moves a
+  // screenshot between views; nothing is moved optimistically. One request at a
+  // time, and no new request for a screenshot whose last outcome is uncertain.
+  const runLifecycle = async (id: number, kind: Lifecycle, session: number | null) => {
+    if (lifecycleInFlight.current || uncertainRef.current[id]) return;
+    const live = captureLive();
+    if (!live()) return;
+    lifecycleInFlight.current = true;
+    setPending({ id, kind, session });
+    setNotice(null);
+    setDrawerMsg(null);
+    // postLifecycle never rejects: errors, aborts and timeouts resolve as 'unknown'.
+    const response = await postLifecycle(inflight.current, id, kind);
+    // Unmounted while waiting (the cleanup aborted this POST): stop here. No
+    // state updates, no reconciliation, no further requests.
+    if (!live()) return;
+    lifecycleInFlight.current = false;
+    setPending(null);
+    const verdict: Verdict = judge(response, id, kind);
+    if (verdict.t === 'confirmed') {
+      finishConfirmed(id, kind, session);
+    } else if (verdict.t === 'failed') {
+      report(session, verdict.text, true);
+      void refreshGallery();
+    } else {
+      putUncertain(id, { id, kind, session, checking: true, note: '' });
+      await reconcile(id, kind, session);
+    }
+  };
+
+  // The shared Revive registry lives outside React. A drawer's unmount cleanup
+  // updates it (e.g. "running" → "unresolved, id kept") during the same commit
+  // in which this component rendered, so re-render once after the drawer
+  // closes: parent effects run after child cleanup, so the assistant then reads
+  // the registry's current state instead of a stale one.
+  const [, setRegistryRead] = useState(0);
+  useEffect(() => {
+    if (detail === null) setRegistryRead((n) => n + 1);
+  }, [detail]);
+
+  // Drop selections whose screenshot is gone or no longer active (buried), so a
+  // later Resurrection does not bring back a stale selection.
+  useEffect(() => {
+    if (gallery.phase !== 'ready') return;
+    const active = new Set(gallery.screenshots.filter((s) => s.state === 'active').map((s) => s.screenshotId));
+    setSelectedIds((cur) => (cur.every((sid) => active.has(sid)) ? cur : cur.filter((sid) => active.has(sid))));
+  }, [gallery]);
+
+  const archived = view === 'crypt';
+  const screenshots = gallery.phase === 'ready' ? gallery.screenshots : [];
+  const detailRecord = detail ? screenshots.find((item) => String(item.screenshotId) === detail.id) : undefined;
+  const detailShot = detailRecord ? toShot(detailRecord) : null;
+  const detailArchived = detailRecord?.state === 'archived';
+  // Crypt and multi-select have no current screenshot to validate for a suggestion.
+  const selectedRecords = archived ? [] : selectedIds
+    .map((sid) => screenshots.find((s) => s.screenshotId === sid))
+    .filter((s): s is Screenshot => s !== undefined && s.state === 'active');
+  const selected = selectedRecords.length === 1 ? selectedRecords[0] : undefined;
+  const { validation, conflicts, retry, cardSummary } = useValidatedAnalysis(selected, analysisAuthority);
+  // The same eligibility check as at click time (see chooseAction), from the
+  // shared authority's LATEST read: pending, failed and invalid reads suggest nothing.
+  const rule = currentSuggestionRule(analysisAuthority, selected);
+  // Batch 6B: one read of the automatic state for the screenshot shown in the
+  // assistant (the drawer's panel keeps it current while it is open).
+  const selectedAutoId = automation.enabled && selected ? selected.screenshotId : null;
+  const selectedAutoEpoch = selectedAutoId !== null ? autoEpochs[selectedAutoId] ?? 0 : 0;
+  useEffect(() => {
+    if (selectedAutoId === null) return;
+    const controller = new AbortController();
+    void getAutoProcess(selectedAutoId, boundedFetch(AUTO_READ_TIMEOUT_MS, controller.signal)).then((r) => {
+      if (!controller.signal.aborted && r.ok) putAutoState(r.data);
+    });
+    return () => controller.abort();
+  }, [selectedAutoId, selectedAutoEpoch, putAutoState]);
+  const settleAuto = (sid: number) => {
+    setAutoEpochs((cur) => ({ ...cur, [sid]: (cur[sid] ?? 0) + 1 }));
+    void refreshGallery();
+  };
+  const reviewAuto = (sid: number) => {
+    setDetail(null);
+    setDrawerMsg(null);
+    setView('workspace');
+    setSelectedIds([sid]);
+    setAssistantCollapsed(false);
+    requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-testid="live-assistant"]')?.focus());
+  };
+  const suggestion = rule.kind === 'suggest' ? rule.action : undefined;
+
+  // Check the committed selection and rule at the write boundary, even if a
+  // handler belonging to an earlier suggestion is invoked after invalidation.
+  // The COMMITTED selection: which screenshot the UI is about, and its record
+  // from the committed gallery. Written only in a layout effect (never during a
+  // render that might not commit), so a handler captured by an older render
+  // still sees the latest committed gallery here, not its own closure's.
+  // Suggestion eligibility itself is NOT cached here; it is checked live, below.
+  const choiceAuthority = useRef<{ id: number; record: Screenshot }>();
+  useLayoutEffect(() => {
+    choiceAuthority.current = selected ? { id: selected.screenshotId, record: selected } : undefined;
+    return () => { choiceAuthority.current = undefined; };
+  }, [selected]);
+
+  const chooseAction = (id: number, choice: ActionChoice | null) => {
+    const authority = choiceAuthority.current;
+    if (authority?.id !== id) return;
+    if (choice?.basis === 'accepted_suggestion') {
+      // The SAME eligibility rule as rendering, against the live shared
+      // authority (not React state): a newer read may have started, failed or
+      // answered after this button was rendered. This is the only check.
+      // The committed record, not `screenshots` from this handler's closure:
+      // an older render's gallery snapshot must not decide eligibility.
+      const live = currentSuggestionRule(analysisAuthority, authority.record);
+      const latest = analysisAuthority.get(id);
+      if (live.kind !== 'suggest' || live.action !== choice.action) return;
+      if (latest?.analysis?.classification.category !== choice.category) return;
+    }
+    setChoices((previous) => {
+      if (choice) return { ...previous, [id]: choice };
+      const next = { ...previous };
+      delete next[id];
+      return next;
+    });
+  };
+  const shots = screenshots
+    .filter((shot) => (shot.state === 'archived') === archived)
+    .map((shot) => toShot(
+      shot, choices[shot.screenshotId], cardSummary(shot),
+      selected?.screenshotId === shot.screenshotId && suggestion ? LIVE_ACTIONS[suggestion].label : undefined,
+    ));
+  const titleOf = (id: number) => {
+    const record = screenshots.find((s) => s.screenshotId === id);
+    return record ? toShot(record).title : `Screenshot #${id}`;
+  };
+
+  const uncertainNotice = (u: Uncertain) => (
+    <div role="status" className="sg-uncertain" key={u.id}>
+      <p>
+        {u.checking
+          ? `Checking whether ${LABEL[u.kind]} completed for ${titleOf(u.id)}…`
+          : `We could not confirm whether ${LABEL[u.kind]} completed for ${titleOf(u.id)}.${u.note}`}
+      </p>
+      <Button size="sm" disabled={u.checking} onClick={() => void reconcile(u.id, u.kind, u.session)}>
+        Check status
+      </Button>
+    </div>
+  );
+  const detailId = detail ? Number(detail.id) : null;
+  const offDrawerUncertain = Object.values(uncertain).filter((u) => u.id !== detailId);
+  const pendingId = pending?.id ?? null;
+
+  return (
+    <div className="sg" data-testid="live-workspace">
+      <a className="sg-skip" href="#sg-main">Skip to content</a>
+      <AppHeader modeLabel="Private workspace" demo={false} />
+      <div className="sg-layout" data-assistant={assistantCollapsed ? 'collapsed' : 'open'}>
+        <div className="sg-col">
+          <NavTabs
+            active={view}
+            onNavigate={(next) => {
+              setView(next);
+              setNotice(null);
+            }}
+            cryptCount={screenshots.filter((shot) => shot.state === 'archived').length}
+            pendingCount={0}
+            views={['workspace', 'crypt']}
+          />
+          <main id="sg-main" className="sg-panel" tabIndex={-1} aria-busy={gallery.phase === 'loading'}>
+            {archived ? (
+              <div className="sg-viewhead">
+                <h2 className="sg-display sg-wshead__title">The Crypt</h2>
+                <p className="sg-wshead__sub">Archived screenshots rest here. Resurrect any of them at any time.</p>
+                <p className="sg-note">{CRYPT_GALLERY_NOTE}</p>
+              </div>
+            ) : (
+              <WorkspaceHeading demo={false} />
+            )}
+            {gallery.phase === 'ready' && !archived && (
+              <AutomationToggle automation={automation} providerMode={provider.mode} />
+            )}
+            {gallery.phase === 'ready' && !archived && (
+              <UploadDropZone
+                onFiles={upload}
+                disabled={uploading}
+                filterByMime={false}
+                hint="PNG, JPEG or WebP, up to 15 MB each. Files are stored in your private workspace."
+              />
+            )}
+            {uploading && <p role="status">Uploading screenshots…</p>}
+            {pending && pendingId !== detailId && (
+              <p role="status">{pending.kind === 'archive' ? 'Burying' : 'Resurrecting'} {titleOf(pending.id)}…</p>
+            )}
+            {offDrawerUncertain.map(uncertainNotice)}
+            {notice && <p role={notice.error ? 'alert' : 'status'}>{notice.text}</p>}
+            {gallery.phase === 'loading' && <p role="status">Loading your workspace…</p>}
+            {gallery.phase === 'error' && (
+              <div className="sg-empty">
+                <p role="alert">{gallery.message}</p>
+                <Button onClick={() => {
+                  setGallery({ phase: 'loading' });
+                  setAttempt((value) => value + 1);
+                }}>Try again</Button>
+              </div>
+            )}
+            {gallery.phase === 'ready' && (
+              <ScreenshotGallery
+                shots={shots}
+                selectedIds={archived ? [] : selectedRecords.map((s) => String(s.screenshotId))}
+                onToggle={
+                  archived
+                    ? undefined
+                    : (sid) =>
+                        setSelectedIds((cur) =>
+                          cur.includes(Number(sid)) ? cur.filter((x) => x !== Number(sid)) : [...cur, Number(sid)],
+                        )
+                }
+                onOpen={(id, opener) => {
+                  setDrawerMsg(null);
+                  setDetail({ id, opener, session: ++sessionCounter.current });
+                }}
+                renderExtra={
+                  archived
+                    ? (shot) => {
+                        const id = Number(shot.id);
+                        const busy = pendingId === id;
+                        return (
+                          <div className="sg-shot__foot">
+                            <Button
+                              size="sm"
+                              icon="restore"
+                              disabled={pending !== null || Boolean(uncertain[id])}
+                              aria-busy={busy}
+                              aria-label={`Resurrection for ${shot.title}`}
+                              onClick={() => void runLifecycle(id, 'restore', null)}
+                            >
+                              {busy ? 'Resurrecting…' : 'Resurrection'}
+                            </Button>
+                          </div>
+                        );
+                      }
+                    : undefined
+                }
+                emptyMessage={archived ? 'The Crypt is empty.' : 'No screenshots yet. Upload one to get started.'}
+              />
+            )}
+          </main>
+        </div>
+        <div className="sg-side">
+          <LiveAssistant
+            selected={selectedRecords}
+            providerMode={provider.mode}
+            choices={choices}
+            validation={validation}
+            conflicts={conflicts}
+            rule={rule}
+            onRetry={() => {
+              if (conflicts) void refreshGallery(STATUS_CHECK_TIMEOUT_MS);
+              retry();
+            }}
+            onChoose={chooseAction}
+            onOpen={(sid, opener) => {
+              setDrawerMsg(null);
+              setDetail({ id: String(sid), opener, session: ++sessionCounter.current });
+            }}
+            onClearSelection={() => setSelectedIds([])}
+            collapsed={assistantCollapsed}
+            onToggleCollapsed={() => setAssistantCollapsed((c) => !c)}
+            autoStates={automation.enabled ? autoStates : undefined}
+            draftEpochs={autoEpochs}
+          />
+        </div>
+      </div>
+      {detail && detailShot && (
+        <Drawer
+          key={detail.session}
+          title={detailShot.title}
+          opener={detail.opener}
+          onClose={() => setDetail(null)}
+          footer={
+            <div className="sg-drawer__actions">
+              <Button
+                icon={detailArchived ? 'restore' : 'box'}
+                disabled={pending !== null || Boolean(uncertain[Number(detailShot.id)])}
+                aria-busy={pendingId === Number(detailShot.id)}
+                onClick={() =>
+                  void runLifecycle(Number(detailShot.id), detailArchived ? 'restore' : 'archive', detail.session)
+                }
+              >
+                {pendingId === Number(detailShot.id)
+                  ? detailArchived ? 'Resurrecting…' : 'Burying…'
+                  : detailArchived ? 'Resurrection' : 'Safe Burial'}
+              </Button>
+              <p className="sg-note">{CRYPT_GALLERY_NOTE}</p>
+            </div>
+          }
+        >
+          <div className="sg-drawer__art">
+            <ShotArt kind="image" src={detailShot.imageSrc} alt={`Preview of ${detailShot.title}`} />
+          </div>
+          <dl className="sg-facts">
+            <dt>Saved</dt><dd>{detailShot.savedLabel}</dd>
+            <dt>Size</dt><dd>{detailShot.sizeLabel}</dd>
+            <dt>Status</dt><dd>{detailShot.statusLabel}</dd>
+          </dl>
+          {detailRecord && (
+            <RevivePanel
+              key={`revive-${autoEpochs[detailRecord.screenshotId] ?? 0}`}
+              autoMode={automation.enabled}
+              onConsentGranted={() => setConsentSignal((n) => n + 1)}
+              screenshot={detailRecord}
+              providerMode={provider.mode}
+              providerLoading={provider.loading}
+              refreshProvider={provider.refresh}
+              onAnalysisChanged={() => void refreshGallery()}
+              analysisAuthority={analysisAuthority}
+            />
+          )}
+          {detailRecord && !detailArchived && automation.enabled && (
+            <AutoPilot
+              screenshot={detailRecord}
+              providerMode={provider.mode}
+              startSignal={consentSignal}
+              onState={putAutoState}
+              onSettled={() => settleAuto(detailRecord.screenshotId)}
+              onReview={reviewAuto}
+            />
+          )}
+          {/* An archived screenshot's saved drafts stay readable; active ones live in the assistant. */}
+          {detailRecord && detailArchived && <ArchivedDrafts screenshot={detailRecord} providerMode={provider.mode} />}
+          {pending && pendingId === Number(detailShot.id) && (
+            <p role="status">{pending.kind === 'archive' ? 'Burying…' : 'Resurrecting…'} You can close this panel; the request keeps going.</p>
+          )}
+          {uncertain[Number(detailShot.id)] && uncertainNotice(uncertain[Number(detailShot.id)])}
+          {drawerMsg && drawerMsg.session === detail.session && (
+            <p role="alert" className="sg-form-error">{drawerMsg.text}</p>
+          )}
+        </Drawer>
+      )}
+    </div>
+  );
+}

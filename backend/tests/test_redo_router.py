@@ -32,6 +32,7 @@ from app.db.base import Base
 from app.main import create_app
 from app.ratelimit import TokenBucketRateLimiter
 from app.services.artifact_version_service import ArtifactVersionService
+from tests.consent_helpers import grant_body
 
 TRUSTED = config.TRUSTED_ORIGINS[0]
 HDRS = {"Origin": TRUSTED, "X-Requested-With": "fetch"}
@@ -91,7 +92,7 @@ def _shots(c, n=3):
         r = c.post("/api/screenshots", headers=HDRS,
                    files=[("files", (f"{i}.png", png((i * 30, 5, 5)), "image/png"))])
         sid = r.json()["results"][0]["screenshotId"]
-        c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+        c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
         ids.append(sid)
     return ids
 
@@ -132,7 +133,8 @@ def _versions(eng, kind):
 def test_note_redo_202_polls_to_successful_and_keeps_the_manual_edit(client):
     c, eng, ad = client
     aid, ids = _note(c)
-    c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"content": {"topic": "My edit"}})
+    base = c.get(f"/api/study-notes/{aid}").json()["versionId"]
+    c.post(f"/api/study-notes/{aid}/edits", headers=HDRS, json={"baseVersionId": base, "content": {"topic": "My edit"}})
     r = _redo_note(c, aid, {"instructions": "focus on pitfalls"})
     assert r.status_code == 202
     body = r.json()
@@ -363,7 +365,7 @@ def test_analysis_redo_gates(client):
     # never-analysed screenshot and missing id: identical 404
     fresh = c.post("/api/screenshots", headers=HDRS,
                    files=[("files", ("z.png", png((1, 2, 3)), "image/png"))]).json()["results"][0]["screenshotId"]
-    c.post(f"/api/screenshots/{fresh}/consent", headers=HDRS, json={"granted": True})
+    c.post(f"/api/screenshots/{fresh}/consent", headers=HDRS, json=grant_body())
     r_fresh = c.post(f"/api/screenshots/{fresh}/analysis/redo", headers=HDRS)
     r_missing = c.post("/api/screenshots/987654/analysis/redo", headers=HDRS)
     assert r_fresh.status_code == r_missing.status_code == 404 and r_fresh.json() == r_missing.json()

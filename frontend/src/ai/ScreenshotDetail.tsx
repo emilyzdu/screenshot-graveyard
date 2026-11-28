@@ -17,14 +17,15 @@ import {
 } from './messages';
 import { pollOperation } from './pollOperation';
 import { PrivacyNotice, useProviderStatus } from './PrivacyNotice';
+import { DISCLOSURE_CHANGED_TEXT, grantableDisclosure, useDisclosure } from './useDisclosure';
 import { StatusBadge } from './StatusBadge';
 import {
   acquireRevive,
   markReviveActive,
   markReviveUnresolved,
   releaseRevive,
-  REVIVE_IN_FLIGHT_TEXT,
-  REVIVE_UNRESOLVED_TEXT,
+  REVIVE_SUCCEEDED_TEXT,
+  reviveWaitText,
 } from './reviveCoordinator';
 import { useConsent } from './useConsent';
 import { DEFAULT_MAX_POLLS, DEFAULT_POLL_INTERVAL_MS, type PollState } from './useOperationPolling';
@@ -103,7 +104,10 @@ export function ScreenshotDetail({
 
   const [draftCategory, setDraftCategory] = useState<Category>(CATEGORIES[0]);
   const [draftEpitaph, setDraftEpitaph] = useState('');
-  const { mode: providerMode, loading: providerLoading } = useProviderStatus();
+  const { mode: providerMode, loading: providerLoading, refresh: refreshProvider } = useProviderStatus();
+  // P1-A: the server's disclosure, shown verbatim; a grant echoes exactly this one.
+  const { state: disclosureState, recover: recoverDisclosure } = useDisclosure();
+  const shownDisclosure = grantableDisclosure(disclosureState, providerMode);
   const providerWord = providerLoading ? 'checking the AI provider\u2026' : 'provider status could not be confirmed';
 
   // Escape dismisses the drawer. Ignore IME composition, handled keys and open dropdowns.
@@ -220,10 +224,14 @@ export function ScreenshotDetail({
   const onGrant = () =>
     guarded(async () => {
       setMessage(null);
-      const res = await setConsent(id, true);
+      if (!shownDisclosure) return; // never grant without the disclosure on screen
+      const res = await setConsent(id, true, fetch, shownDisclosure);
       if (res.ok) {
         setConsentLookup(id, 'granted');
         setMessage({ kind: 'info', text: 'AI consent granted for this screenshot.' });
+      } else if (res.status === 409 && res.code === 'disclosure_changed') {
+        setMessage({ kind: 'error', text: DISCLOSURE_CHANGED_TEXT });
+        void recoverDisclosure(refreshProvider); // provider + disclosure, as a pair
       } else {
         setMessage({ kind: 'error', text: describeRequestFailure(res) });
       }
@@ -251,10 +259,13 @@ export function ScreenshotDetail({
       setPoll({ phase: 'idle' });
       const lock = await acquireRevive(id);
       if (!lock.ok) {
-        setMessage({
-          kind: 'error',
-          text: lock.reason === 'in_flight' ? REVIVE_IN_FLIGHT_TEXT : REVIVE_UNRESOLVED_TEXT,
-        });
+        if (lock.reason === 'succeeded') {
+          // Already done on the server: never classify again; recover the saved result.
+          setMessage({ kind: 'info', text: REVIVE_SUCCEEDED_TEXT });
+          await loadAnalysis();
+          return;
+        }
+        setMessage({ kind: 'error', text: reviveWaitText(lock.reason) });
         return;
       }
       const res = await classifyScreenshot(id);
@@ -339,6 +350,15 @@ export function ScreenshotDetail({
 
       <div className="ai-block" aria-labelledby="ai-consent-h">
         <h4 id="ai-consent-h">AI consent</h4>
+        <p className="ai-hint" data-testid="ai-disclosure">
+          {shownDisclosure
+            ? shownDisclosure.text
+            : disclosureState.t === 'error'
+              ? 'The AI processing disclosure could not be loaded, so consent cannot be given right now.'
+              : disclosureState.t === 'loading'
+                ? 'Loading the AI processing disclosure\u2026'
+                : 'The AI provider changed while this was being checked, so consent cannot be given yet. Close and reopen to check again.'}
+        </p>
         <p role="status" aria-live="polite" data-testid="consent-state">
           {consent === 'loading' && 'Checking consent\u2026'}
           {consent === 'granted' && '\u2714 AI processing is authorized for this screenshot.'}
@@ -354,7 +374,7 @@ export function ScreenshotDetail({
             type="button"
             className="gy-btn gy-btn--revive"
             onClick={onGrant}
-            disabled={busy || consent === 'loading' || providerMode === 'unknown'}
+            disabled={busy || consent === 'loading' || providerMode === 'unknown' || !shownDisclosure}
           >
             {authorizeLabel}
           </button>

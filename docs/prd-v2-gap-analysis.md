@@ -151,7 +151,13 @@ is superseded. Review result for the Draft PR at 7742649 plus this follow-up:
 | Not-yet-covered: Creations Review/Approve flow, Activity states, Connections and Privacy page, OneNote/Calendar, undo | Not implemented, out of scope for this UX PR. |
 | PrivacyNotice shows "unconfirmed" text while loading | Minor remaining gap (assistant is fixed; the shared notice still uses one string). |
 
-## Known backend safety gap: consent revoke race
+## Known backend safety gap: consent revoke race (resolved in Batch 6A)
+
+Resolved by tasks.md task 7.1 in Batch 6A: every AI adapter call is now
+authorized under the workspace lock with fresh, provider-scoped consent, and a
+result is saved only if consent is unchanged. A request already sent cannot be
+recalled; its result is discarded. The original note follows.
+
 
 Consent can still be revoked after the AI worker's last consent check and before
 the adapter call, for Classification and Study Notes (including Redo). Draft PR

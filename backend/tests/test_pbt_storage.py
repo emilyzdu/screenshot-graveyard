@@ -688,6 +688,8 @@ def test_p9_concurrent_uploads_one_blob_distinct_screenshots(img, workers, tmp_p
         assert blob.sha256 == img["sha256"]
         assert store.read(blob.storage_path, expected_sha256=blob.sha256) == img["data"]
         tmp_dir = store.root / ".tmp"
+        # The allocation lock is held on the root directory itself, so .tmp/
+        # holds no lock file: any file here is a leaked temp file.
         leftover = [p for p in tmp_dir.iterdir() if p.is_file()] if tmp_dir.is_dir() else []
         assert leftover == []
     finally:

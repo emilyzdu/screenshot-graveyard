@@ -31,6 +31,7 @@ from app.services.operation_service import OperationService
 from app.services.study_note_service import StudyNoteService
 from app.services.vault_service import VaultService
 from app.storage.file_store import FileStore
+from tests.consent_helpers import current_disclosure
 
 SECTIONS = {
     "topic", "main_concepts", "extracted_code", "code_explanations",
@@ -104,7 +105,7 @@ def _shots(s, store, wid, n=3, consent=True):
     ids = [v.upload(png((i * 40, 9, 9)), filename=f"{i}.png").screenshot_id for i in range(n)]
     if consent:
         for sid in ids:
-            ConsentService(s, wid).record_consent(sid, True)
+            ConsentService(s, wid).record_consent(sid, True, disclosure=current_disclosure())
     return ids, v
 
 

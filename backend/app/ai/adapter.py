@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from app import config
-from app.ai.schemas import ClassificationResult, StudyNoteResult
+from app.ai.schemas import ClassificationResult, EventDraftResult, StudyNoteResult
 
 
 class AIAdapterError(Exception):
@@ -40,6 +40,28 @@ class AIAdapterTimeoutError(AIAdapterError):
     The calling service maps this to a `failed`/`uncertain` operation with
     sources preserved (INV-4).
     """
+
+
+class AIAdapterRateLimitedError(AIAdapterError):
+    """The provider refused the request because of a rate or quota limit.
+
+    Nothing was produced; the user may retry later. Never retried automatically.
+    """
+
+
+class AIAdapterOutputError(AIAdapterError):
+    """The provider answered, but its output failed validation (nothing is used)."""
+
+
+def adapter_failure_detail(exc: BaseException) -> str:
+    """The generic, user-safe operation detail for an adapter failure."""
+    if isinstance(exc, AIAdapterOutputError):
+        return "AI output failed validation"
+    if isinstance(exc, AIAdapterTimeoutError):
+        return "AI analysis timed out"
+    if isinstance(exc, AIAdapterRateLimitedError):
+        return "AI provider busy; try again later"
+    return "AI analysis failed"
 
 
 def default_timeout_seconds() -> float:
@@ -84,5 +106,16 @@ class AIAdapter(Protocol):
         screenshot ids flow through to `StudyNoteResult.references` to preserve
         provenance (INV-7). ``instructions`` has the same untrusted, Redo-only
         meaning as for `classify_and_epitaph`.
+        """
+        ...
+
+    def event_draft(self, images: list[tuple[int, bytes, str]]) -> EventDraftResult:
+        """Prepare one calendar event DRAFT from ONE screenshot (Batch 4B).
+
+        ``images`` has the same (screenshot_id, image_bytes, mime) shape as
+        `study_note`; the ids flow through to `EventDraftResult.references`.
+        An implementation must never invent dates, times, time zones or
+        locations: anything it cannot read is ``None`` and listed in
+        ``missing_fields``. No external calendar is ever written.
         """
         ...

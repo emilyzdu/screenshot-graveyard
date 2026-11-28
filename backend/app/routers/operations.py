@@ -15,8 +15,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.db.session import get_session
+from app import config
 from app.services.operation_service import (
     OperationNotFoundError,
+    OperationQuotaExceededError,
     OperationService,
     OperationServiceUnavailableError,
 )
@@ -64,7 +66,14 @@ def build_operations_router() -> APIRouter:
 
     @router.post("", response_model=None)
     def accept_operation(request: Request, body: OperationAcceptanceBody):
-        """Create a durable pending operation; CSRF middleware guards this POST."""
+        """Create a durable pending operation; CSRF middleware guards this POST.
+
+        A source-less Task 2.4 scaffold with no caller in the product: it runs no
+        AI and is never charged to the deployment-wide AI quota. It is not
+        exposed in production at all (the same 404 as an unknown API path).
+        """
+        if config.IS_PRODUCTION:
+            return JSONResponse(status_code=404, content=_error_body("not_found", "Not Found"))
         workspace_id, err = _resolved_workspace_or_response(request)
         if err is not None:
             return err
@@ -72,7 +81,9 @@ def build_operations_router() -> APIRouter:
         try:
             service = OperationService(session, workspace_id)
             try:
-                operation = service.create_pending(body.kind)
+                operation = service.create_pending(body.kind, metered=False)
+            except OperationQuotaExceededError as exc:
+                return JSONResponse(status_code=429, content=_error_body(exc.code, exc.public_message))
             except OperationServiceUnavailableError:
                 return JSONResponse(
                     status_code=503,

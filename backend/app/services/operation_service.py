@@ -28,9 +28,11 @@ from sqlalchemy.orm import Session
 from app.db import models
 from app import config
 from app.db.repository import CrossWorkspaceError, QuotaExceededError, WorkspaceRepository
+from app.services.global_usage_service import GlobalAIBudgetExceededError, GlobalUsageService
 
 
-AI_OPERATION_KINDS = frozenset({"classify", "study_note", "redo"})
+# event_draft (Batch 4B) is a metered AI operation like the others.
+AI_OPERATION_KINDS = frozenset({"classify", "study_note", "redo", "event_draft"})
 
 
 @dataclass
@@ -65,6 +67,17 @@ class OperationServiceUnavailableError(OperationServiceError):
     """The database could not safely create, read, or update an operation."""
 
 
+class OperationGuardError(Exception):
+    """Raised by a ``complete_after_persistence`` guard: do not persist.
+
+    ``detail`` is the generic, safe failure detail recorded on the operation.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
 class OperationPersistenceError(OperationServiceError):
     """Related artifact persistence failed; the operation was not successful."""
 
@@ -75,6 +88,23 @@ class OperationTransitionError(OperationServiceError):
 
 class OperationQuotaExceededError(OperationServiceError):
     """The trusted workspace has exhausted its bounded AI-call allowance."""
+
+    code = "quota_exceeded"
+    public_message = "AI operation quota exceeded"
+
+
+class OperationGlobalBudgetExceededError(OperationQuotaExceededError):
+    """The deployment-wide daily AI-request quota is used up (all workspaces).
+
+    An application-side request quota, not a verified financial cap. Nothing
+    was created or sent.
+    """
+
+    code = "ai_budget_reached"
+    public_message = (
+        "The daily AI limit for this app has been reached. Nothing was sent. "
+        "Please try again tomorrow, or explore the demo."
+    )
 
 
 @dataclass(frozen=True)
@@ -107,8 +137,16 @@ class OperationService:
             artifact_id=operation.artifact_id,
         )
 
-    def create_pending(self, kind: str) -> OperationState:
-        """Persist a new accepted AI operation in its initial ``pending`` state."""
+    def create_pending(self, kind: str, *, metered: bool = True) -> OperationState:
+        """Persist a new accepted AI operation in its initial ``pending`` state.
+
+        ``metered`` (default) reserves one unit of the deployment-wide daily AI
+        quota: callers pass it only after the request was validated and will be
+        executed (sources owned, consent granted, a worker scheduled). The
+        source-less Task 2.4 acceptance scaffold (``POST /api/operations``)
+        creates an UNMETERED placeholder: it can never touch the global quota.
+        Every operation still counts toward its own workspace's quota.
+        """
         if kind not in AI_OPERATION_KINDS:
             raise ValueError("invalid operation kind")
         try:
@@ -117,11 +155,18 @@ class OperationService:
             if self._repo.lock_workspace() is None:
                 raise OperationServiceUnavailableError("operation service unavailable")
             self._repo.ensure_ai_quota(config.MAX_AI_CALLS_PER_WORKSPACE)
+            # Deployment-wide daily quota, reserved in this same transaction
+            # (a reused operation never reaches this line, so it costs nothing).
+            if metered:
+                GlobalUsageService(self._session).reserve_ai_call(config.MAX_AI_CALLS_PER_DAY)
             operation = self._repo.create_operation(kind=kind, status="pending")
             self._session.commit()
         except QuotaExceededError as exc:
             self._session.rollback()
             raise OperationQuotaExceededError("AI operation quota exceeded") from exc
+        except GlobalAIBudgetExceededError as exc:
+            self._session.rollback()
+            raise OperationGlobalBudgetExceededError("global AI request quota reached") from exc
         except OperationServiceUnavailableError:
             self._session.rollback()
             raise
@@ -129,6 +174,68 @@ class OperationService:
             self._session.rollback()
             raise OperationServiceUnavailableError("operation service unavailable") from exc
         return self._state(operation)
+
+    def create_or_reuse_keyed(
+        self,
+        kind: str,
+        idempotency_key: str,
+        *,
+        key_prefix: str,
+        reusable: Callable[[OperationState], bool],
+        before_create: Callable[[], None] | None = None,
+        after_lock: Callable[[], None] | None = None,
+    ) -> tuple[OperationState, bool]:
+        """Return the newest reusable keyed operation, or create one (Batch 4A).
+
+        Runs under the same per-workspace write lock as ``create_pending``, so the
+        find-then-insert is atomic: two concurrent requests for the same
+        ``key_prefix`` cannot both create an operation. ``reusable`` decides
+        whether the newest matching operation stands (for example: still pending,
+        or it produced an artifact). ``before_create`` runs inside the lock only
+        when a new operation is needed (for example a consent check); if it
+        raises, nothing is written. ``after_lock`` runs inside the lock before
+        both the reuse lookup and creation (for example a final eligibility
+        check that must hold for either outcome); if it raises, nothing is
+        written. Returns ``(state, reused)``.
+        """
+        if kind not in AI_OPERATION_KINDS:
+            raise ValueError("invalid operation kind")
+        if not idempotency_key.startswith(key_prefix):
+            raise ValueError("idempotency key must start with its prefix")
+        try:
+            if self._repo.lock_workspace() is None:
+                raise OperationServiceUnavailableError("operation service unavailable")
+            if after_lock is not None:
+                after_lock()
+            existing = self._repo.latest_operation_with_key_prefix(key_prefix)
+            if existing is not None:
+                state = self._state(existing)
+                if reusable(state):
+                    self._session.rollback()  # release the lock; nothing changed
+                    return state, True
+            if before_create is not None:
+                before_create()
+            self._repo.ensure_ai_quota(config.MAX_AI_CALLS_PER_WORKSPACE)
+            # Deployment-wide daily quota, reserved in this same transaction
+            # (a reused operation never reaches this line, so it costs nothing).
+            GlobalUsageService(self._session).reserve_ai_call(config.MAX_AI_CALLS_PER_DAY)
+            operation = self._repo.create_operation(
+                kind=kind, status="pending", idempotency_key=idempotency_key
+            )
+            self._session.commit()
+        except QuotaExceededError as exc:
+            self._session.rollback()
+            raise OperationQuotaExceededError("AI operation quota exceeded") from exc
+        except GlobalAIBudgetExceededError as exc:
+            self._session.rollback()
+            raise OperationGlobalBudgetExceededError("global AI request quota reached") from exc
+        except SQLAlchemyError as exc:
+            self._session.rollback()
+            raise OperationServiceUnavailableError("operation service unavailable") from exc
+        except BaseException:
+            self._session.rollback()
+            raise
+        return self._state(operation), False
 
     def get(self, operation_id: int) -> OperationState:
         """Read an owned operation, treating absent and foreign IDs identically."""
@@ -236,6 +343,7 @@ class OperationService:
         persist: Callable[[], int | models.Artifact | None],
         *,
         terminal_status: str = "successful",
+        guard: Callable[[], None] | None = None,
     ) -> OperationState:
         """Atomically persist related work and make the operation successful.
 
@@ -249,6 +357,11 @@ class OperationService:
         uncertainty (P13, e.g. a study note with Uncertain/ambiguous content)
         and record ``uncertain`` in the SAME commit; it never becomes
         ``successful`` or ``failed`` through this path.
+
+        ``guard`` (Batch 6A) runs under the same lock, after the pending check
+        and before ``persist``. If it raises :class:`OperationGuardError`,
+        nothing is persisted and the operation fails with the guard's detail
+        (used to discard a result whose AI consent changed while in flight).
         """
         if terminal_status not in {"successful", "uncertain"}:
             raise ValueError("terminal_status must be successful or uncertain")
@@ -264,6 +377,8 @@ class OperationService:
                 raise OperationNotFoundError("operation not found")
             if current.status != "pending":
                 raise OperationTransitionError("operation is already terminal")
+            if guard is not None:
+                guard()
             persisted = persist()
             # Existing callers may return their freshly created ORM artifact;
             # new callers can return its integer ID. Both preserve the prior
@@ -282,6 +397,13 @@ class OperationService:
         except (OperationNotFoundError, OperationTransitionError):
             self._session.rollback()
             raise
+        except OperationGuardError as exc:
+            self._session.rollback()
+            try:
+                self.set_terminal_status(operation_id, "failed", error_detail=exc.detail)
+            except OperationTransitionError:
+                pass  # another serialized worker completed first; it stands
+            raise OperationPersistenceError("operation persistence refused") from exc
         except Exception as exc:
             self._session.rollback()
             try:
@@ -339,8 +461,26 @@ class OperationService:
                 operation.status = "failed"
                 operation.error_detail = "Processing interrupted; please retry"
                 operation.updated_at = moment
+            # Batch 6A (P2-F): finalize the dispatch audit in the SAME transaction.
+            # "interrupted" = the request may already have reached the provider
+            # (it is never recorded as "not sent"); its result was never saved.
+            # Only rows still "dispatched" change, so this is idempotent and a
+            # late worker (refused by the pending check) cannot overwrite it.
+            stale_ids = [op.id for op in stale]
+            if stale_ids:
+                for row in self._session.scalars(
+                    select(models.AIDispatch).where(
+                        models.AIDispatch.workspace_id == self._repo.workspace_id,
+                        models.AIDispatch.operation_id.in_(stale_ids),
+                        models.AIDispatch.state == "dispatched",
+                    )
+                ):
+                    row.state = "interrupted"
+                    row.completed_at = moment
             self._session.commit()
-        except SQLAlchemyError as exc:
+        except Exception as exc:
+            # Nothing is half-applied: the operations and their audit rows roll
+            # back together, to be recovered by the next sweep.
             self._session.rollback()
             raise OperationServiceUnavailableError("operation service unavailable") from exc
         return len(stale)

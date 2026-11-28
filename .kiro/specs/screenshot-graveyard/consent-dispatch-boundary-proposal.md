@@ -1,7 +1,17 @@
 # Proposal: AI dispatch and in-flight consent boundary
 
-Status: proposal only. Nothing in this document is implemented. No file under
-`backend/` or `frontend/` is changed by the commit that adds it.
+Status: implemented in Batch 6A (`backend/app/services/ai_dispatch_service.py`,
+migration `c6a1d15a0001`, tests in `backend/tests/test_ai_dispatch.py`). The
+implementation is design D with one simplification: authorization and the
+"sent" mark are a single locked transaction (state `dispatched`), because no
+code runs between them; a withdrawal is therefore ordered either before the
+authorization (nothing is sent) or after it (the request is in flight and its
+result is discarded at persistence). It also covers Calendar event drafts and
+adds provider-scoped consent. Section 7's guarantees and limits apply as
+written. The text below is the original proposal.
+
+Original status: proposal only. Nothing in this document was implemented by the
+commit that added it.
 
 Scope: `ClassificationService` (initial classify and AI Redo) and
 `StudyNoteService` (initial generation and AI Redo).

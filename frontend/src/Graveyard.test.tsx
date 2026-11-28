@@ -25,6 +25,8 @@ vi.mock('./api/ai', () => ({
   getConsent: () => Promise.resolve({ ok: true, data: false }),
   getAnalysis: () => Promise.resolve({ ok: false, status: 404, code: 'not_found', message: 'Not Found' }),
   setConsent: vi.fn(),
+  // Batch 6A (P1-A): the server's disclosure (Fake by default; real-mode tests override it).
+  getDisclosure: vi.fn(async () => ({ ok: true as const, data: { provider: 'fake' as const, revision: 'fake-test-rev', text: 'This development build uses the Fake AI adapter. Nothing is sent to an external AI provider, and the result is placeholder text that does not read your screenshot.' } })),
   classifyScreenshot: vi.fn(),
   getOperation: vi.fn(),
   editAnalysis: vi.fn(),

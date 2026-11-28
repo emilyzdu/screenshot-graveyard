@@ -55,6 +55,10 @@ WORKSPACE_COOKIE_MAX_AGE: int = int(
 # In production, TRUSTED_ORIGINS MUST be set explicitly; the app refuses to fall
 # back to the insecure localhost development defaults (fail fast at startup).
 APP_ENV: str = os.environ.get("APP_ENV", "development").strip().lower()
+if APP_ENV not in {"development", "production"}:
+    # A typo (e.g. "prod") must never silently select development behavior.
+    raise RuntimeError("APP_ENV must be 'development' or 'production'")
+IS_PRODUCTION: bool = APP_ENV == "production"
 
 # Dev-only default trusted origins (localhost same-origin). NEVER used in prod.
 _DEV_DEFAULT_ORIGINS = (
@@ -65,8 +69,21 @@ _DEV_DEFAULT_ORIGINS = (
 
 def _parse_origins(raw: str) -> tuple[str, ...]:
     # Normalize to lowercase scheme://host[:port], strip trailing slash. Exact
-    # matching only — no wildcard, no subdomain/prefix matching.
-    return tuple(o.strip().rstrip("/").lower() for o in raw.split(",") if o.strip())
+    # matching only — no wildcard, no subdomain/prefix matching. An entry that
+    # no browser could send as an Origin (path, query, fragment, credentials,
+    # invalid port, wildcard) fails startup in every environment.
+    from app.production_checks import normalize_origin
+
+    origins = []
+    for entry in (o for o in raw.split(",") if o.strip()):
+        try:
+            origins.append(normalize_origin(entry))
+        except ValueError as exc:
+            raise RuntimeError(
+                "TRUSTED_ORIGINS entries must be scheme://host[:port] origins (no path, query, "
+                "fragment, credentials or wildcard)."
+            ) from exc
+    return tuple(origins)
 
 
 def _resolve_trusted_origins() -> tuple[str, ...]:
@@ -80,6 +97,10 @@ def _resolve_trusted_origins() -> tuple[str, ...]:
             )
         raw = _DEV_DEFAULT_ORIGINS
     origins = _parse_origins(raw)
+    if not origins:
+        # e.g. "," or " , ": an explicit setting that lists nothing is a mistake,
+        # never a silent "no trusted origins".
+        raise RuntimeError("TRUSTED_ORIGINS must list at least one origin.")
     # Defense in depth: never allow a wildcard entry.
     if any(o == "*" or "*" in o for o in origins):
         raise RuntimeError("TRUSTED_ORIGINS must not contain a wildcard.")
@@ -125,13 +146,83 @@ MAX_REQUEST_BYTES: int = int(
     )
 )
 
-# Per-workspace DB quota counters.
+# Per-workspace DB quota counters. Production uses smaller public defaults
+# (deployment readiness R7); an explicit environment value always wins.
 MAX_SCREENSHOTS_PER_WORKSPACE: int = int(
-    os.environ.get("MAX_SCREENSHOTS_PER_WORKSPACE", "500")
+    os.environ.get("MAX_SCREENSHOTS_PER_WORKSPACE", "30" if IS_PRODUCTION else "500")
 )
 MAX_AI_CALLS_PER_WORKSPACE: int = int(
-    os.environ.get("MAX_AI_CALLS_PER_WORKSPACE", "1000")
+    os.environ.get("MAX_AI_CALLS_PER_WORKSPACE", "25" if IS_PRODUCTION else "1000")
 )
+
+# ---- Global (cross-workspace) protections (deployment readiness R5, R8) ----
+# Per-workspace quotas alone do not bound a public app: anyone can mint a new
+# workspace. These limits count across ALL workspaces, persist in the database
+# (``global_counter``) and are enforced under a database row lock.
+#
+# MAX_AI_CALLS_PER_DAY is an APPLICATION-SIDE REQUEST QUOTA: the number of new
+# AI operations (each is at most one provider request) accepted per UTC day. It
+# is NOT a verified financial cap: the only hard spending cap is the provider
+# account's own limit (prepaid credits / project budget), which this app cannot
+# read or verify. Production requires it to be set explicitly.
+MAX_AI_CALLS_PER_DAY: int = int(os.environ.get("MAX_AI_CALLS_PER_DAY", "10000"))
+# Total bytes of stored original screenshots across all workspaces. New bytes
+# are refused once reached; existing files are never deleted. Production
+# requires it to be set explicitly.
+MAX_TOTAL_STORAGE_BYTES: int = int(
+    os.environ.get("MAX_TOTAL_STORAGE_BYTES", str(50 * 1024**3))
+)
+# Uploads are refused when the storage volume has less free space than this.
+STORAGE_MIN_FREE_BYTES: int = int(
+    os.environ.get("STORAGE_MIN_FREE_BYTES", str(256 * 1024**2))
+)
+for _name in ("MAX_SCREENSHOTS_PER_WORKSPACE", "MAX_AI_CALLS_PER_WORKSPACE",
+              "MAX_AI_CALLS_PER_DAY", "MAX_TOTAL_STORAGE_BYTES"):
+    if globals()[_name] <= 0:
+        raise RuntimeError(f"{_name} must be a positive integer")
+if STORAGE_MIN_FREE_BYTES < 0:
+    raise RuntimeError("STORAGE_MIN_FREE_BYTES must not be negative")
+
+
+# ---- Trusted reverse proxy (deployment readiness R4) ----
+# The per-IP rate limiter uses the direct peer address. Only when that peer is
+# inside one of these networks (the platform's own proxy) is X-Forwarded-For
+# consulted, and then only its right-most entry that is NOT itself a trusted
+# proxy. Empty = never trust forwarding headers (local development). Production
+# requires an explicit value; "none" states that no proxy is in front.
+def _parse_proxy_networks(raw: str | None):
+    """``None``/unset (development) or exactly ``none`` -> no trusted proxy.
+
+    Otherwise one or more CIDRs. A value that lists nothing (``","``), mixes
+    ``none`` with networks, contains an invalid network, or trusts every address
+    (prefix length 0, e.g. ``0.0.0.0/0``) is rejected: it would either silently
+    disable proxy handling or let any client forge its address.
+    """
+    import ipaddress
+
+    if raw is None or not raw.strip():
+        return ()
+    parts = [p.strip() for p in raw.split(",")]
+    named = [p for p in parts if p]
+    if [p.lower() for p in named] == ["none"]:
+        return ()
+    if not named:
+        raise RuntimeError("TRUSTED_PROXY_CIDRS lists no network (use 'none' to disable)")
+    nets = []
+    for part in named:
+        if part.lower() == "none":
+            raise RuntimeError("TRUSTED_PROXY_CIDRS cannot combine 'none' with networks")
+        try:
+            net = ipaddress.ip_network(part, strict=False)
+        except ValueError as exc:
+            raise RuntimeError("TRUSTED_PROXY_CIDRS contains an invalid network") from exc
+        if net.prefixlen == 0:
+            raise RuntimeError("TRUSTED_PROXY_CIDRS must not trust every address")
+        nets.append(net)
+    return tuple(nets)
+
+
+TRUSTED_PROXY_NETWORKS = _parse_proxy_networks(os.environ.get("TRUSTED_PROXY_CIDRS"))
 
 def _positive_finite_float(raw: str, *, setting: str) -> float:
     """Parse a required-positive finite duration at startup.
@@ -209,6 +300,19 @@ AI_STUDY_NOTE_MAX_OUTPUT_TOKENS: int = _positive_int(
     os.environ.get("AI_STUDY_NOTE_MAX_OUTPUT_TOKENS", "2000"),
     setting="AI_STUDY_NOTE_MAX_OUTPUT_TOKENS",
 )
+AI_EVENT_DRAFT_MAX_OUTPUT_TOKENS: int = _positive_int(
+    os.environ.get("AI_EVENT_DRAFT_MAX_OUTPUT_TOKENS", "1200"),
+    setting="AI_EVENT_DRAFT_MAX_OUTPUT_TOKENS",
+)
+# Optional, only for reasoning models (e.g. ``gpt-6-luna``). Unset means the
+# ``reasoning`` parameter is not sent at all, which non-reasoning models such as
+# the default ``gpt-4.1-mini`` require. ``none`` keeps every output token for
+# the structured result.
+OPENAI_REASONING_EFFORT: str | None = (os.environ.get("OPENAI_REASONING_EFFORT") or "").strip().lower() or None
+if OPENAI_REASONING_EFFORT is not None and OPENAI_REASONING_EFFORT not in {
+    "none", "low", "medium", "high", "xhigh", "max"
+}:
+    raise RuntimeError("OPENAI_REASONING_EFFORT must be one of none, low, medium, high, xhigh, max")
 AI_PROVIDER_MAX_RETRIES: int = int(os.environ.get("AI_PROVIDER_MAX_RETRIES", "0"))
 if AI_PROVIDER_MAX_RETRIES != 0:
     raise RuntimeError("AI_PROVIDER_MAX_RETRIES must be 0; automatic retries are disabled")

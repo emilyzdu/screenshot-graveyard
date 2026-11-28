@@ -92,6 +92,17 @@ def _build_api_router() -> APIRouter:
         """Expose only the active public provider mode, never configuration."""
         return ProviderModeResponse(mode=config.AI_PROVIDER)
 
+    @router.get("/ai/disclosure")
+    def ai_disclosure() -> dict:
+        """The AI processing disclosure the user must see before granting consent.
+
+        Public text only. A grant must echo its ``provider`` and ``revision``
+        (P1-A); the server never accepts a client-chosen provider.
+        """
+        from app.ai.disclosure import current_disclosure
+
+        return current_disclosure().as_dict()
+
     return router
 
 
@@ -165,6 +176,11 @@ def create_app(
         A :class:`fastapi.FastAPI` instance with the API router registered and,
         when ``frontend/dist`` exists, the built SPA served at the same origin.
     """
+    # Deployment foundation: in production, refuse to start on an unsafe or
+    # incomplete environment (database, storage, origins, proxy, global limits).
+    if config.IS_PRODUCTION:
+        from app.production_checks import assert_production_config
+        assert_production_config()
     # Fail closed at startup for real-provider configuration errors.  Fake mode
     # stays network-free and has no credential requirement.
     from app.ai.provider import configure_ai_adapter
@@ -264,8 +280,16 @@ def create_app(
     application.include_router(build_study_notes_router())
     from app.routers.study_note_artifacts import build_study_note_artifacts_router
     application.include_router(build_study_note_artifacts_router())
+    from app.routers.preparations import build_preparations_router
+    application.include_router(build_preparations_router())
+    from app.routers.event_drafts import build_event_drafts_router
+    application.include_router(build_event_drafts_router())
+    from app.routers.approvals import build_approvals_router
+    application.include_router(build_approvals_router())
     from app.routers.study_selection import build_study_selection_router
     application.include_router(build_study_selection_router())
+    from app.routers.auto_process import build_auto_process_router
+    application.include_router(build_auto_process_router())
 
     # Explicit guard: any unmatched /api path returns a JSON API error, never
     # the SPA. Registered before the SPA catch-all so it takes precedence for

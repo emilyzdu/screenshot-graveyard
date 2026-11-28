@@ -475,10 +475,10 @@ The properties are grouped into these reusable modules:
   - **Acceptance test / expected output:** tests assert each animation maps to a real state and is disabled/minimized under reduced-motion.
   - **Priority:** P1
 
-- [ ] 4.9 `[P1 — optional, non-blocking]` Single external integration (OneNote preferred; Google Docs fallback)
-  - Implement one genuine external destination via `Delivery_Service`, honoring INV-8/INV-9 (verified evidence before success; no blind duplicate on uncertain retry). Enables PBT-DELIVERY. No P0 task depends on this.
+- [ ] 4.9 `[P1 — optional, non-blocking]` External delivery of approved drafts: Google Calendar (primary); Notion (conditional) (amended by AMD-1; formerly "Single external integration (OneNote preferred; Google Docs fallback)")
+  - Implement Requirement 25 (`prd-v2-additions.md`) via `Delivery_Service`, honoring INV-8/INV-9 (verified evidence and a stored receipt before success; idempotency key per artifact, version and destination; reconcile before any retry). Google Calendar first; Notion only under the conditions in 25.1(b). OAuth account binding per 25.4. Explicit Send of an approved version only (25.3). Planned as Pixel World PRD Phase D. Enables PBT-DELIVERY. No P0 task depends on this.
   - **Dependencies:** 2.8, 4.1
-  - **Requirements:** 16.3, 8.4, 8.5, 14.6, 14.7, INV-8, INV-9, P27, P28
+  - **Requirements:** 16.3, 25, 8.4, 8.5, 14.6, 14.7, INV-8, INV-9, P27, P28
   - **Acceptance test / expected output:** with the integration enabled, tests assert a write is reported successful only with verified evidence and an uncertain retry does not create a duplicate external artifact.
   - **Priority:** P1
 
@@ -581,8 +581,9 @@ The properties are grouped into these reusable modules:
 
 ### Phase 7: Backend safety follow-ups (additive; not part of Draft PR #1)
 
-- [ ] 7.1 Close the consent check-to-dispatch race for Classification and Study Notes
-  - Proposal only so far: `.kiro/specs/screenshot-graveyard/consent-dispatch-boundary-proposal.md`. **Not implemented in PR #1, and PR #1 does not eliminate the race:** consent can still be revoked after the worker's last check and before the adapter call (`classification_service.py` 221 to 242, `study_note_service.py` 204 to 222).
+- [x] 7.1 Close the consent check-to-dispatch race for Classification and Study Notes
+  - **Implemented in Batch 6A** (`backend/app/services/ai_dispatch_service.py`, migration `c6a1d15a0001`), for Classification, Study Notes / Make Notes, both Redo paths and Calendar event drafts: one locked authorization transaction (fresh consent for every source + heartbeat + `ai_dispatch` rows) immediately before the adapter call, consent writes under the same workspace lock, a consent version bumped on every change, a persistence guard that discards a result if consent changed while the request was out, and provider-scoped consent (a Fake-mode grant never authorizes a real provider). Tests: `backend/tests/test_ai_dispatch.py`. A request authorized before a withdrawal cannot be recalled; its result is not saved.
+  - History: the proposal is `.kiro/specs/screenshot-graveyard/consent-dispatch-boundary-proposal.md`. PR #1 did not eliminate the race (`classification_service.py` 221 to 242, `study_note_service.py` 204 to 222 at that time).
   - Implement the recommended design from the proposal (durable dispatch ledger, consent version, revoke aborting not-yet-sent dispatches, persistence guard) as a separately reviewable backend PR, with deterministic adapter-boundary revocation tests for Classification, Study Notes, and both Redo paths. State plainly in code, UI copy, and docs that revocation cannot recall content already sent or stop a call in flight.
   - **Dependencies:** 2.3, 2.5, 2.7, 3.3
   - **Requirements:** 9.2, 9.4

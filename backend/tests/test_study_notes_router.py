@@ -27,6 +27,7 @@ from app.db import models
 from app.db.base import Base
 from app.main import create_app
 from app.ratelimit import TokenBucketRateLimiter
+from tests.consent_helpers import grant_body
 
 TRUSTED = config.TRUSTED_ORIGINS[0]
 HDRS = {"Origin": TRUSTED, "X-Requested-With": "fetch"}
@@ -85,7 +86,7 @@ def _shots(c, n=3, consent=True):
         ids.append(r.json()["results"][0]["screenshotId"])
     if consent:
         for sid in ids:
-            c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+            c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
     return ids
 
 

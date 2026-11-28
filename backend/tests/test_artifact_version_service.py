@@ -25,7 +25,7 @@ from app.services.artifact_version_service import (
     ArtifactVersionError,
     ArtifactVersionService,
 )
-from app.services.study_note_artifact_service import StudyNoteArtifactService
+from app.services.study_note_artifact_service import StudyNoteArtifactService, StudyNoteArtifactUnavailableError
 
 
 def doc(**kw) -> str:
@@ -308,8 +308,11 @@ def test_manual_edit_service_pointer_failure_leaves_history_unchanged(ctx, monke
     s.commit()
     monkeypatch.setattr(WorkspaceRepository, "set_current_version",
                         lambda self, a, v: (_ for _ in ()).throw(RuntimeError("x")))
-    with pytest.raises(RuntimeError):
+    # Batch 5A: an unexpected failure is rolled back and reported as the
+    # service's controlled "unavailable" error (cause preserved), not leaked.
+    with pytest.raises(StudyNoteArtifactUnavailableError) as raised:
         StudyNoteArtifactService(s, wa).save_edit(aid, {"topic": "Edited"})
+    assert isinstance(raised.value.__cause__, RuntimeError)
     monkeypatch.undo()
     s.rollback()
     assert [r.version_number for r in _rows(s, aid)] == [1]

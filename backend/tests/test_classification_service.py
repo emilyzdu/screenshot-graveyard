@@ -30,6 +30,7 @@ from app.services.classification_service import ClassificationService
 from app.services.consent_service import ConsentService
 from app.services.operation_service import OperationService
 from app.services.vault_service import VaultService
+from tests.consent_helpers import current_disclosure
 
 
 def png(color=(3, 6, 9)) -> bytes:
@@ -85,7 +86,7 @@ def _setup(s, store, wid, *, consent=True, data=None):
     v = VaultService(s, wid, file_store=store)
     sid = v.upload(data or png(), filename="x.png").screenshot_id
     if consent:
-        ConsentService(s, wid).record_consent(sid, True)
+        ConsentService(s, wid).record_consent(sid, True, disclosure=current_disclosure())
     op = OperationService(s, wid).create_pending("classify")
     return sid, op.operation_id, v
 
@@ -179,7 +180,7 @@ def test_adapter_timeout_marks_failed_without_partial_artifacts_or_byte_mutation
         s, wa, adapter=CountingAdapter(mode=FakeAIAdapterMode.TIMEOUT), vault=vault
     ).run_classification(sid, op_id)
     assert outcome.operation.status == "failed"
-    assert outcome.operation.error_detail == "AI analysis failed"
+    assert outcome.operation.error_detail == "AI analysis timed out"  # Batch 6A: honest detail
     assert _counts(s, wa) == (0, 0, 0)
     assert vault.read_original(sid).data == original_bytes
 

@@ -24,6 +24,7 @@ import app.db.session as sess_mod
 from app.db.base import Base
 from app.main import create_app
 from app.ratelimit import TokenBucketRateLimiter
+from tests.consent_helpers import grant_body
 
 TRUSTED = config.TRUSTED_ORIGINS[0]
 HDRS = {"Origin": TRUSTED, "X-Requested-With": "fetch"}
@@ -73,7 +74,7 @@ def test_consent_defaults_to_not_granted(client):
 def test_record_and_read_consent_roundtrip(client):
     c, _, _ = client
     sid = _upload(c)
-    r = c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+    r = c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
     assert r.status_code == 200
     assert r.json() == {"screenshotId": sid, "granted": True}
     # Persisted and readable.
@@ -86,7 +87,7 @@ def test_record_consent_requires_csrf_header(client):
     c, _, _ = client
     sid = _upload(c)
     # Missing X-Requested-With -> CSRF middleware rejects the state-changing POST.
-    r = c.post(f"/api/screenshots/{sid}/consent", headers={"Origin": TRUSTED}, json={"granted": True})
+    r = c.post(f"/api/screenshots/{sid}/consent", headers={"Origin": TRUSTED}, json=grant_body())
     assert r.status_code == 403
     # State unchanged: still not granted.
     assert c.get(f"/api/screenshots/{sid}/consent").json()["granted"] is False
@@ -102,7 +103,7 @@ def test_read_consent_requires_no_csrf_header(client):
 def test_missing_screenshot_generic_404(client):
     c, _, _ = client
     r_get = c.get("/api/screenshots/987654/consent")
-    r_post = c.post("/api/screenshots/987654/consent", headers=HDRS, json={"granted": True})
+    r_post = c.post("/api/screenshots/987654/consent", headers=HDRS, json=grant_body())
     assert r_get.status_code == 404
     assert r_post.status_code == 404
 
@@ -113,7 +114,7 @@ def test_foreign_workspace_cannot_grant_or_read_consent(client):
     c.cookies.clear()
     c.get("/api/workspace")  # fresh workspace B
     r_get = c.get(f"/api/screenshots/{sid}/consent")
-    r_post = c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+    r_post = c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
     r_missing = c.get("/api/screenshots/987654/consent")
     assert r_get.status_code == 404
     assert r_post.status_code == 404
@@ -129,7 +130,7 @@ def test_spoofed_workspace_params_ignored(client):
     r = c.post(
         f"/api/screenshots/{sid}/consent?workspace_id=1",
         headers={**HDRS, "X-Workspace-Id": "1"},
-        json={"granted": True},
+        json=grant_body(),
     )
     assert r.status_code == 404  # cookie identity authoritative
 
@@ -181,11 +182,11 @@ def test_consent_database_failure_is_unavailable_not_a_false_grant(client, monke
     sid = _upload(c)
     from app.db.repository import WorkspaceRepository
 
-    def unavailable(self, screenshot_id, granted):
+    def unavailable(self, screenshot_id, granted, provider=None, disclosure_revision=None):
         raise SQLAlchemyError("database unavailable")
 
     monkeypatch.setattr(WorkspaceRepository, "set_consent", unavailable)
-    r = c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True})
+    r = c.post(f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body())
     assert r.status_code == 503
     assert r.json() == {
         "error": {"code": "service_unavailable", "message": "Service temporarily unavailable"}

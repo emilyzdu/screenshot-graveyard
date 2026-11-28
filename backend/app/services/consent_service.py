@@ -33,6 +33,11 @@ from typing import Callable, TypeVar
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from typing import Protocol
+
+from app import config
+from app.ai.disclosure import Disclosure, current_disclosure, revision_for
+from app.db import models
 from app.db.repository import CrossWorkspaceError, WorkspaceRepository
 
 T = TypeVar("T")
@@ -59,12 +64,46 @@ class ConsentRequiredError(ConsentServiceError):
     """
 
 
+class DisclosureChangedError(ConsentServiceError):
+    """A grant did not carry the CURRENT disclosure (absent, stale or another
+    provider's). Nothing is recorded; the caller shows ``current`` and asks again."""
+
+    def __init__(self, current: Disclosure) -> None:
+        super().__init__("the AI processing disclosure changed")
+        self.current = current
+
+
+class DisclosureRef(Protocol):
+    provider: str
+    revision: str
+
+
 class ConsentServiceUnavailableError(ConsentServiceError):
     """Raised when consent state cannot be read or recorded safely.
 
     Callers must fail closed: a database failure is never treated as consent and
     therefore can never authorize an AI-adapter invocation.
     """
+
+
+def consent_is_effective(record: models.ConsentRecord | None, provider: str | None = None) -> bool:
+    """Whether a stored consent authorizes AI processing with ``provider`` (Batch 6A).
+
+    Granted AND given for this provider. The Fake AI sends nothing, so any grant
+    suffices there. For a real provider, only a grant recorded while that
+    provider (and its disclosure) was active counts; a Fake-mode grant or a
+    pre-6A grant (provider unknown) does not.
+    """
+    mode = provider or config.AI_PROVIDER
+    if record is None or not record.granted:
+        return False
+    if mode == "fake":
+        return True
+    # A real provider: the grant must be for THIS provider and for the
+    # disclosure revision that is active now (P1-A).
+    return record.provider == mode and record.disclosure_revision is not None and (
+        record.disclosure_revision == revision_for(mode)
+    )
 
 
 @dataclass(frozen=True)
@@ -85,17 +124,45 @@ class ConsentService:
 
     # ------------------------------------------------------------- record/read
 
-    def record_consent(self, screenshot_id: int, granted: bool) -> ConsentState:
+    def record_consent(
+        self, screenshot_id: int, granted: bool, *, disclosure: DisclosureRef | None = None
+    ) -> ConsentState:
         """Record explicit consent (or an explicit withdrawal) for a screenshot.
 
         Workspace-scoped: a foreign/missing screenshot raises the generic
         ScreenshotNotFoundError and nothing is written. Commits on success.
+
+        Batch 6A: the write happens under the workspace write lock, the same
+        lock every AI dispatch authorization takes (``AIDispatchService``), so a
+        withdrawal is ordered strictly before or after each authorization. A
+        withdrawal stops every authorization ordered after it. It cannot recall
+        a request authorized before it; that request's result is not saved.
+
+        P1-A: a GRANT must carry the provider and revision of the disclosure the
+        user was shown, and both must equal the server's current disclosure;
+        otherwise DisclosureChangedError and nothing is written. A withdrawal
+        never needs a disclosure.
         """
         try:
+            if self._repo.lock_workspace() is None:
+                raise CrossWorkspaceError()
+            active = current_disclosure()
+            if granted and (
+                disclosure is None
+                or disclosure.provider != active.provider
+                or disclosure.revision != active.revision
+            ):
+                raise DisclosureChangedError(active)
             record = self._repo.set_consent(
-                screenshot_id=screenshot_id, granted=bool(granted)
+                screenshot_id=screenshot_id,
+                granted=bool(granted),
+                provider=active.provider,
+                disclosure_revision=active.revision,
             )
             self._session.commit()
+        except DisclosureChangedError:
+            self._session.rollback()
+            raise
         except CrossWorkspaceError:
             # Missing OR foreign-workspace screenshot: identical generic result.
             self._session.rollback()
@@ -103,7 +170,7 @@ class ConsentService:
         except SQLAlchemyError as exc:
             self._session.rollback()
             raise ConsentServiceUnavailableError("consent service unavailable") from exc
-        return ConsentState(screenshot_id=screenshot_id, granted=record.granted)
+        return ConsentState(screenshot_id=screenshot_id, granted=consent_is_effective(record))
 
     def get_consent(self, screenshot_id: int) -> ConsentState:
         """Return the consent state for an OWNED screenshot.
@@ -117,8 +184,9 @@ class ConsentService:
             raise ScreenshotNotFoundError("screenshot not found")
         except SQLAlchemyError as exc:
             raise ConsentServiceUnavailableError("consent service unavailable") from exc
-        granted = bool(record.granted) if record is not None else False
-        return ConsentState(screenshot_id=screenshot_id, granted=granted)
+        # Effective for the CURRENT provider: a Fake-mode grant reads as "not
+        # granted" in real mode, so the user sees the real disclosure and decides.
+        return ConsentState(screenshot_id=screenshot_id, granted=consent_is_effective(record))
 
     def has_consent(self, screenshot_id: int) -> bool:
         """True only if explicit, granted consent is recorded for the screenshot.
@@ -131,7 +199,7 @@ class ConsentService:
             record = self._repo.get_consent(screenshot_id)
         except (CrossWorkspaceError, SQLAlchemyError):
             return False
-        return record is not None and bool(record.granted)
+        return consent_is_effective(record)
 
     # --------------------------------------------------------------- the gate
 
@@ -149,7 +217,7 @@ class ConsentService:
             raise ScreenshotNotFoundError("screenshot not found")
         except SQLAlchemyError as exc:
             raise ConsentServiceUnavailableError("consent service unavailable") from exc
-        if record is None or not record.granted:
+        if not consent_is_effective(record):
             raise ConsentRequiredError("AI processing consent required")
 
     def run_with_consent(

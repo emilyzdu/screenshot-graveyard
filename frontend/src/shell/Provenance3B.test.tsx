@@ -1,0 +1,182 @@
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Analysis, ApiResult, ProviderMode } from '../api/ai';
+import type { ListResult, Screenshot, ScreenshotAnalysis } from '../api/client';
+
+// Batch 3B display-correctness regressions: provenance scope (B1) and
+// confidence wording (B2). API modules are mocked; no network, no AI provider.
+const client = vi.hoisted(() => ({
+  getWorkspace: vi.fn(), listScreenshots: vi.fn<() => Promise<ListResult>>(), uploadScreenshots: vi.fn(),
+  archiveScreenshot: vi.fn(), restoreScreenshot: vi.fn(),
+}));
+vi.mock('../api/client', () => ({ ...client, imageUrl: (id: number) => `/api/screenshots/${id}/image` }));
+const ai = vi.hoisted(() => ({
+  getProviderMode: vi.fn<() => Promise<ApiResult<ProviderMode>>>(),
+  getConsent: vi.fn(), setConsent: vi.fn(), classifyScreenshot: vi.fn(), getOperation: vi.fn(),
+  getAnalysis: vi.fn<(id: number, f?: typeof fetch) => Promise<ApiResult<Analysis>>>(),
+  // Batch 4A: no Make Notes preparation exists unless a test says otherwise.
+  getMakeNotesPreparation: vi.fn<typeof import('../api/ai').getMakeNotesPreparation>(() =>
+    Promise.resolve({ ok: false as const, status: 404, code: 'no_preparation', message: 'No preparation yet' })),
+  requestMakeNotesDraft: vi.fn(),
+  // Batch 4B: no calendar event draft exists unless a test says otherwise.
+  getEventDraftPreparation: vi.fn<typeof import('../api/ai').getEventDraftPreparation>(() =>
+    Promise.resolve({ ok: false as const, status: 404, code: 'no_preparation', message: 'No preparation yet' })),
+  requestEventDraft: vi.fn(),
+  // Batch 5A: version history and edits (inert unless a test configures them).
+  listStudyNoteVersions: vi.fn(),
+  listEventDraftVersions: vi.fn(),
+  saveEventDraftEdit: vi.fn(),
+  // Batch 5B: approval (inert unless a test configures it).
+  getApprovalStatus: vi.fn(),
+  approveVersion: vi.fn(),
+  saveStudyNoteEdit: vi.fn(),
+  getEventDraft: vi.fn(),
+  getStudyNote: vi.fn(),
+}));
+vi.mock('../api/ai', () => ai);
+import LiveWorkspace from './LiveWorkspace';
+import { RevivePanel } from './RevivePanel';
+
+const shot = (id: number, name: string, a: ScreenshotAnalysis): Screenshot => ({
+  screenshotId: id, state: 'active', mimeType: 'image/png', originalFilename: name,
+  isDuplicate: false, duplicateOf: null, byteSize: 9, uploadedAt: '2026-11-19T20:00:00Z', analysis: a,
+});
+// Batch 6A (P2-E): `provider` is what the SERVER recorded on the stored version.
+const analysis = (
+  id: number, categoryOrigin: string, epitaphOrigin: string, category = 'Study/Knowledge',
+  provider: 'fake' | 'openai' | null = 'fake',
+): Analysis => ({
+  screenshotId: id,
+  classification: { category: category as Analysis['classification']['category'], confidence: 0.75, uncertain: false, versionNumber: 2, origin: categoryOrigin, provider: categoryOrigin === 'manual_edit' ? null : provider },
+  epitaph: { text: 'Epitaph text', visibleFacts: 'Synthetic adapter does not interpret image content.', inferredIntent: null, uncertain: false, versionNumber: 1, origin: epitaphOrigin, provider: epitaphOrigin === 'manual_edit' ? null : provider },
+});
+const fail = (status: number): ApiResult<never> => ({ ok: false, status, code: 'x', message: 'x' });
+const PROVENANCE_PHRASES = /simulated|edited by you|AI result|Provider unconfirmed/i;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  client.getWorkspace.mockResolvedValue({ ok: true, active: true });
+  ai.getProviderMode.mockResolvedValue({ ok: true, data: 'fake' });
+  ai.getConsent.mockResolvedValue({ ok: true, data: true });
+});
+
+/** The card's provenance text, which must be scoped to the Epitaph only. */
+const cardProvenance = (name: string) =>
+  screen.getByRole('article', { name }).querySelector('.sg-shot__provenance')?.textContent ?? '';
+
+describe('B1: provenance is attributed only to the field the list response describes', () => {
+  it('category edited, Epitaph simulated: the card labels the Epitaph only; the assistant keeps field-level detail', async () => {
+    // The list summary cannot say the category was edited: it only carries epitaphOrigin.
+    client.listScreenshots.mockResolvedValue({ ok: true, screenshots: [shot(1, 'cat.png', { category: 'Study/Knowledge', uncertain: false, epitaph: 'Epitaph text', epitaphOrigin: 'ai_generate', epitaphProvider: 'fake' })] });
+    ai.getAnalysis.mockResolvedValue({ ok: true, data: analysis(1, 'manual_edit', 'ai_generate') });
+    render(<LiveWorkspace />);
+    await screen.findByRole('article', { name: 'cat.png' });
+    await waitFor(() => expect(cardProvenance('cat.png')).not.toBe(''));
+    expect(cardProvenance('cat.png')).toBe('Epitaph: simulated (Fake AI)');
+    await act(async () => { fireEvent.click(screen.getByRole('checkbox', { name: 'Select cat.png' })); });
+    const a = screen.getByTestId('live-assistant');
+    await within(a).findByText('Visible facts');
+    expect(within(a).queryByText(/Partly edited · rest simulated/)).not.toBeInTheDocument();
+    expect(within(a).getByText(/Category edited by you; Epitaph generated by the demo AI/)).toBeInTheDocument();
+  });
+
+  it('Epitaph edited, category not verified: the card says so for the Epitaph and nothing about the category', async () => {
+    client.listScreenshots.mockResolvedValue({ ok: true, screenshots: [shot(2, 'epi.png', { category: 'Reference/Document', uncertain: false, epitaph: 'My words', epitaphOrigin: 'manual_edit' })] });
+    ai.getAnalysis.mockResolvedValue(fail(404));
+    render(<LiveWorkspace />);
+    await screen.findByRole('article', { name: 'epi.png' });
+    await waitFor(() => expect(cardProvenance('epi.png')).not.toBe(''));
+    expect(cardProvenance('epi.png')).toBe('Epitaph: edited by you');
+    // No other provenance claim anywhere on the card (in particular none about the category).
+    const line = screen.getByRole('article', { name: 'epi.png' }).querySelector('.sg-shot__analysis')?.textContent ?? '';
+    expect(line.replace('Epitaph: edited by you', '')).not.toMatch(PROVENANCE_PHRASES);
+  });
+
+  it('full analysis GET 503 with a manually edited Epitaph: the fallback label uses the summary Epitaph origin', async () => {
+    client.listScreenshots.mockResolvedValue({ ok: true, screenshots: [shot(3, 'fb.png', { category: 'Memory/Entertainment', uncertain: false, epitaph: 'Mine', epitaphOrigin: 'manual_edit' })] });
+    ai.getAnalysis.mockResolvedValue(fail(503));
+    render(<LiveWorkspace />);
+    await screen.findByRole('article', { name: 'fb.png' });
+    await act(async () => { fireEvent.click(screen.getByRole('checkbox', { name: 'Select fb.png' })); });
+    const a = screen.getByTestId('live-assistant');
+    await within(a).findByText(/full analysis could not be loaded/);
+    const head = a.querySelector('.sg-live-analysis__head')?.textContent ?? '';
+    expect(head).toContain('Epitaph: edited by you');
+    expect(head).not.toMatch(/Fake AI · simulated result|rest simulated/);
+  });
+});
+
+describe('B2: a confidence percentage appears only for a model-reported value', () => {
+  const panel = (
+    mode: ProviderMode | 'unknown', categoryOrigin: string,
+    recorded: 'fake' | 'openai' | null = mode === 'unknown' ? null : mode,
+  ) => {
+    ai.getAnalysis.mockResolvedValue({ ok: true, data: analysis(7, categoryOrigin, 'ai_generate', 'Study/Knowledge', recorded) });
+    return render(
+      <RevivePanel
+        screenshot={shot(7, 'p.png', { category: 'Study/Knowledge', uncertain: false, epitaph: 'Epitaph text', epitaphOrigin: 'ai_generate' })}
+        providerMode={mode}
+        providerLoading={false}
+        onAnalysisChanged={() => {}}
+      />,
+    );
+  };
+  const confidenceRow = async () => {
+    const r = await screen.findByLabelText('Classification result');
+    const dt = within(r).getByText('Confidence');
+    return dt.nextElementSibling?.textContent ?? '';
+  };
+
+  it('Fake provider: no percentage', async () => {
+    panel('fake', 'ai_generate');
+    const row = await confidenceRow();
+    expect(row).not.toMatch(/\d+\s*%/);
+    expect(row).not.toMatch(/reported by the model/);
+  });
+
+  it('provider mode lookup failed (unknown): no percentage, no model claim', async () => {
+    panel('unknown', 'ai_generate');
+    const row = await confidenceRow();
+    expect(row).not.toMatch(/\d+\s*%/);
+    expect(row).not.toMatch(/reported by the model/);
+  });
+
+  it('manually edited category (even with a real provider): no percentage, never "model-reported"', async () => {
+    panel('openai', 'manual_edit');
+    const row = await confidenceRow();
+    expect(row).not.toMatch(/\d+\s*%/);
+    expect(row).not.toMatch(/reported by the model/);
+    expect(row).toMatch(/edited by you/i);
+  });
+
+  it('legitimate condition (mocked openai, AI-generated category): the model-reported percentage is shown', async () => {
+    panel('openai', 'ai_generate');
+    expect(await confidenceRow()).toBe('75% as reported by the model (not a calibrated probability)');
+  });
+
+  // ------------------------------------------------ Batch 6A (P2-E) regressions
+  const result = async () => screen.findByLabelText('Classification result');
+  it('P2-E: an earlier Fake result viewed after the server switched to OpenAI stays simulated', async () => {
+    panel('openai', 'ai_generate', 'fake');
+    const r = await result();
+    expect(within(r).getByText('Simulated result')).toBeInTheDocument();
+    expect(within(r).queryByText('AI analysis · can be wrong')).not.toBeInTheDocument();
+    expect(await confidenceRow()).toBe('Not meaningful: the Fake AI returns a fixed placeholder value.');
+    expect(r).toHaveTextContent(/Category generated by the demo AI/);
+  });
+  it('P2-E: an OpenAI result viewed after a switch to Fake stays a real AI result', async () => {
+    panel('fake', 'ai_generate', 'openai');
+    const r = await result();
+    expect(within(r).getByText('AI analysis · can be wrong')).toBeInTheDocument();
+    expect(within(r).queryByText('Simulated result')).not.toBeInTheDocument();
+    expect(await confidenceRow()).toBe('75% as reported by the model (not a calibrated probability)');
+  });
+  it.each(['fake', 'openai'] as const)('P2-E: a legacy result without a recorded provider says so (mode %s)', async (mode) => {
+    panel(mode, 'ai_generate', null);
+    const r = await result();
+    expect(within(r).getByText('AI result · unknown provider')).toBeInTheDocument();
+    expect(within(r).queryByText(/Simulated result|AI analysis · can be wrong/)).not.toBeInTheDocument();
+    expect(await confidenceRow()).toMatch(/^Not shown: the provider of this result was not recorded/);
+    expect(r).toHaveTextContent(/unknown provider: not recorded for this version/);
+  });
+});

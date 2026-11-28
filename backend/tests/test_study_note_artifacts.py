@@ -28,6 +28,7 @@ from app.services.study_note_artifact_service import (
     StudyNoteArtifactUnavailableError,
     StudyNoteEditValidationError,
 )
+from tests.consent_helpers import grant_body
 
 TRUSTED = config.TRUSTED_ORIGINS[0]
 HDRS = {"Origin": TRUSTED, "X-Requested-With": "fetch"}
@@ -76,7 +77,7 @@ def _make_note(client: TestClient, count: int = 2) -> tuple[int, list[int]]:
         sid = response.json()["results"][0]["screenshotId"]
         ids.append(sid)
         assert client.post(
-            f"/api/screenshots/{sid}/consent", headers=HDRS, json={"granted": True}
+            f"/api/screenshots/{sid}/consent", headers=HDRS, json=grant_body()
         ).status_code == 200
     generated = client.post("/api/study-notes", headers=HDRS, json={"screenshotIds": ids})
     assert generated.status_code == 202
@@ -112,7 +113,7 @@ def test_manual_edit_inserts_new_immutable_version_and_preserves_sources(client)
     saved = c.post(
         f"/api/study-notes/{artifact_id}/edits",
         headers=HDRS,
-        json={"content": _edited_content(original)},
+        json={"baseVersionId": original["versionId"], "content": _edited_content(original)},
     )
     assert saved.status_code == 200
     current = saved.json()
@@ -145,16 +146,16 @@ def test_multiple_edits_keep_full_history_and_failed_edit_creates_no_version(cli
     first = c.get(f"/api/study-notes/{artifact_id}").json()
     second = c.post(
         f"/api/study-notes/{artifact_id}/edits", headers=HDRS,
-        json={"content": _edited_content(first, "second")},
+        json={"baseVersionId": first["versionId"], "content": _edited_content(first, "second")},
     ).json()
     third = c.post(
         f"/api/study-notes/{artifact_id}/edits", headers=HDRS,
-        json={"content": _edited_content(second, "third")},
+        json={"baseVersionId": second["versionId"], "content": _edited_content(second, "third")},
     ).json()
     assert [first["versionNumber"], second["versionNumber"], third["versionNumber"]] == [1, 2, 3]
     bad = c.post(
         f"/api/study-notes/{artifact_id}/edits", headers=HDRS,
-        json={"content": {"topic": ""}},
+        json={"baseVersionId": third["versionId"], "content": {"topic": ""}},
     )
     assert bad.status_code == 422
     with Session(engine) as session:
@@ -291,7 +292,7 @@ def test_sources_reopen_through_existing_authorized_image_route_without_bytes_in
     assert c.post(
         f"/api/study-notes/{artifact_id}/edits",
         headers=HDRS,
-        json={"content": _edited_content(original)},
+        json={"baseVersionId": original["versionId"], "content": _edited_content(original)},
     ).status_code == 200
     with Session(engine) as session:
         for sid, expected in original_rows.items():
@@ -306,7 +307,7 @@ def test_export_defaults_current_and_can_select_historical_version_with_markdown
     original = c.get(f"/api/study-notes/{artifact_id}").json()
     saved = c.post(
         f"/api/study-notes/{artifact_id}/edits", headers=HDRS,
-        json={"content": _edited_content(original, "\u03bb heading")},
+        json={"baseVersionId": original["versionId"], "content": _edited_content(original, "\u03bb heading")},
     ).json()
     current_export = c.get(f"/api/study-notes/{artifact_id}/export")
     historical_export = c.get(
@@ -343,7 +344,7 @@ def test_foreign_and_missing_artifact_or_version_are_generic_404_and_spoofing_fa
     spoof = c.post(
         f"/api/study-notes/{artifact_id}/edits?workspaceId=1",
         headers={**HDRS, "X-Workspace-Id": "1"},
-        json={"workspaceId": 1, "content": _edited_content(current)},
+        json={"workspaceId": 1, "baseVersionId": current["versionId"], "content": _edited_content(current)},
     )
     assert spoof.status_code == 404
 
@@ -355,7 +356,7 @@ def test_edit_requires_csrf_and_does_not_create_ai_work_or_operations(client):
     denied = c.post(
         f"/api/study-notes/{artifact_id}/edits",
         headers={"Origin": TRUSTED},
-        json={"content": _edited_content(original)},
+        json={"baseVersionId": original["versionId"], "content": _edited_content(original)},
     )
     assert denied.status_code == 403
     with Session(engine) as session:

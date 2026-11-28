@@ -22,7 +22,14 @@ from app.ai.schemas import (
     Category,
     ClassificationResult,
     EpitaphPayload,
+    EventDraftResult,
     StudyNoteResult,
+)
+
+
+_FAKE_EVENT_NOTICE = (
+    "Placeholder text from the Fake AI. It did not read your screenshot, so no "
+    "date, time, time zone or location was extracted."
 )
 
 
@@ -37,6 +44,8 @@ class FakeAIAdapterMode(str, Enum):
 
 @dataclass(frozen=True)
 class FakeAIAdapter:
+    #: Batch 6A (P2-E): the provider recorded on every version this adapter writes.
+    provider_id = "fake"
     """A deterministic, network-free adapter implementation for tests.
 
     The method annotations match :class:`app.ai.adapter.AIAdapter`. ``INVALID``
@@ -127,6 +136,41 @@ class FakeAIAdapter:
                 else []
             ),
             uncertain_content=[],
+            references=references,
+        )
+
+    def event_draft(self, images: list[tuple[int, bytes, str]]) -> EventDraftResult:
+        """Return a clearly SIMULATED event draft that extracts nothing.
+
+        The Fake never reads the image: no date, time, time zone or location is
+        produced, and every one of them is listed as missing. Only the title is
+        present, as an explicitly simulated placeholder marked uncertain.
+        """
+        self._raise_if_timeout()
+        references = [screenshot_id for screenshot_id, _bytes, _mime in images]
+        if self.mode is FakeAIAdapterMode.INVALID:
+            return cast(
+                EventDraftResult,
+                {
+                    "title": "Simulated event draft (Fake AI)",
+                    "start_date": "tomorrow",
+                    "references": ["not-a-screenshot-id"],
+                    "unexpected": "malformed synthetic fixture",
+                },
+            )
+        unknown = ["start_date", "start_time", "end_date", "end_time", "all_day", "time_zone", "location"]
+        if self.mode is FakeAIAdapterMode.UNCERTAIN:
+            return EventDraftResult(
+                title=None,
+                description=_FAKE_EVENT_NOTICE,
+                missing_fields=["title", *unknown],
+                references=references,
+            )
+        return EventDraftResult(
+            title="Simulated event draft (Fake AI)",
+            description=_FAKE_EVENT_NOTICE,
+            missing_fields=unknown,
+            uncertain_fields=["title"],
             references=references,
         )
 

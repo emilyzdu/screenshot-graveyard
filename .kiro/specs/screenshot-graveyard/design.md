@@ -196,7 +196,7 @@ Routers validate request shape (Pydantic request models), call a service with th
 - **`Artifact_Service`** (INV-1, INV-5, INV-6, INV-7): version history, current-version pointer, redo, edit, compare, source references.
 - **`Consent_Service`**: records/reads per-screenshot consent; gates all AI paths.
 - **`AI_Adapter`** (INV-4, Req 13): the `AIAdapter` Protocol + real + fake implementations.
-- **`Delivery_Service`** — **P1 INTERFACE STUB ONLY** (INV-8, INV-9): method signatures and the external-write safety contract are defined, but there is **no implementation, no OAuth, no third-party infrastructure in P0** (Req 8 note, Req 16.3, Req 14.7).
+- **`Delivery_Service`** — **P1 INTERFACE STUB ONLY** (INV-8, INV-9): method signatures and the external-write safety contract are defined, but there is **no implementation, no OAuth, no third-party infrastructure in P0** (Req 8 note, Req 16.3, Req 14.7). *AMD-1:* its destinations are Google Calendar (primary) and Notion (conditional) per Requirement 25; the delivery design (account binding, receipts, idempotency key per artifact, version and destination) is specified in `docs/pixel-world-technical-design.md` §13 and remains unimplemented.
 
 ### `AIAdapter` Protocol and the fake adapter (Req 13)
 
@@ -387,7 +387,7 @@ erDiagram
 - **`consent_record`** `(id, workspace_id, screenshot_id, granted, granted_at, UNIQUE(workspace_id, screenshot_id))`.
 - **`operation`** `(id, workspace_id, kind, status ∈ {pending, successful, failed, uncertain}, artifact_id NULL, idempotency_key NULL [P1], error_detail NULL, created_at, updated_at)`.
 
-**Every non-`workspace` table carries `workspace_id` as a FK and is indexed on `workspace_id`.** All queries and file reads are workspace-scoped (Req 12.6, 9.9).
+**Every non-`workspace` table carries `workspace_id` as a FK and is indexed on `workspace_id`.** All queries and file reads are workspace-scoped (Req 12.6, 9.9). *Deployment-foundation exception (approved, deployment readiness R5/R8):* the `global_counter` table holds only aggregate, deployment-wide counts (the daily AI-request quota and total stored bytes) and no workspace data; it is read and updated only by `app/services/global_usage_service.py` under a row lock. It is the one table without `workspace_id`, because a per-workspace quota cannot bound a public app where anyone can mint a workspace.
 
 ### `content_json` payload shapes
 
