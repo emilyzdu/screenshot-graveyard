@@ -10,15 +10,15 @@ const ITEMS: { id: OverlayId; label: string; icon: IconName }[] = [
   { id: 'settings', label: 'Settings', icon: 'shield' },
 ];
 
-export function Toolbar({ onOpen }: { onOpen: (id: OverlayId, opener: HTMLElement) => void }) {
+export function Toolbar({ onOpen, active = null }: { onOpen: (id: OverlayId, opener: HTMLElement) => void; active?: OverlayId | null }) {
   return (
     <nav className="pw-toolbar" aria-label="World tools">
       {ITEMS.map((i) => (
-        <button key={i.id} type="button" className="pw-tool" data-tool={i.id} onClick={(e) => onOpen(i.id, e.currentTarget)}>
-          <Icon name={i.icon} size={18} /><span>{i.label}</span>
+        <button key={i.id} type="button" className="pw-tool" data-tool={i.id} data-active={active === i.id || undefined} onClick={(e) => onOpen(i.id, e.currentTarget)}>
+          <Icon name={i.icon} size={16} /><span>{i.label}</span>
         </button>
       ))}
-      <a className="pw-tool" href="?" data-tool="list"><Icon name="grid" size={18} /><span>List view</span></a>
+      <a className="pw-tool" href="?" data-tool="list"><Icon name="grid" size={16} /><span>List view</span></a>
     </nav>
   );
 }

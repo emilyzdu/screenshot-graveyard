@@ -18,10 +18,11 @@ import { SettingsOverlay } from './overlays/SettingsOverlay';
 import { UploadWell } from './overlays/UploadWell';
 import { ApprovalAltar } from './overlays/ApprovalAltar';
 
+// Full text stays available to assistive tech and as a tooltip; sighted users see a small badge.
 const MODE_NOTE = {
   live: null,
-  demo: 'Demo data (prototype): synthetic ghosts, no backend calls.',
-  fallback: 'Backend not reachable: showing synthetic demo ghosts (prototype data, not your screenshots).',
+  demo: { badge: 'Demo Mode', full: 'Demo data (prototype): synthetic ghosts, no backend calls.' },
+  fallback: { badge: 'Offline Demo', full: 'Backend not reachable: showing synthetic demo ghosts (prototype data, not your screenshots).' },
 } as const;
 
 const TITLES: Record<OverlayId, string> = {
@@ -72,9 +73,15 @@ export default function PixelWorld() {
         <LumiPortrait ghostCount={ghosts.length} />
         <div className="pw-title">
           <h1>The Lantern Graveyard</h1>
-          {MODE_NOTE[gallery.mode] && <p className="pw-mode" role="status">{MODE_NOTE[gallery.mode]}</p>}
+          {MODE_NOTE[gallery.mode] && (
+            <p className="pw-mode" role="status" title={MODE_NOTE[gallery.mode]!.full}>
+              <span aria-hidden="true" className="pw-mode__dot" />
+              <span aria-hidden="true">{MODE_NOTE[gallery.mode]!.badge}</span>
+              <span className="pw-sr">{MODE_NOTE[gallery.mode]!.full}</span>
+            </p>
+          )}
         </div>
-        <Toolbar onOpen={openTool} />
+        <Toolbar onOpen={openTool} active={opened && opened.kind !== 'card' ? opened.kind : null} />
       </header>
       <WorldErrorBoundary>
         {gallery.loading ? (

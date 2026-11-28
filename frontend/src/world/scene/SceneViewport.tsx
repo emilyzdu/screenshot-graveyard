@@ -1,3 +1,4 @@
+import type React from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { assetUrl } from '../assets';
 import { LUMI_START, LOCATIONS, PROPS, COLLIDERS, STAGE, nearestLocation, type WorldLocation } from '../model/locations';
@@ -7,6 +8,7 @@ import { useLumiInput } from '../lumi/useLumiInput';
 import { GhostSprite } from './GhostSprite';
 import { LocationHotspot } from './LocationHotspot';
 import { LumiSprite } from './LumiSprite';
+import { artClass, LUMI_SHEET, GHOST_SHEET } from '../model/spriteSpec';
 import { stageScale } from './stageScale';
 import { useReducedMotion } from './useReducedMotion';
 
@@ -21,6 +23,11 @@ export interface SceneViewportProps {
   onOpenCrowd: (c: Crowd, opener: HTMLElement) => void;
 }
 
+const SHEET_VARS = {
+  '--pw-lumi-w': `${LUMI_SHEET.frameW}px`, '--pw-lumi-h': `${LUMI_SHEET.frameH}px`,
+  '--pw-lumi-sheet-w': `${LUMI_SHEET.frameW * LUMI_SHEET.cols}px`, '--pw-lumi-sheet-h': `${LUMI_SHEET.frameH * LUMI_SHEET.rows}px`,
+  '--pw-ghost-sheet-w': `${GHOST_SHEET.frameW * GHOST_SHEET.tints * GHOST_SHEET.framesPerTint}px`, '--pw-ghost-sheet-h': `${GHOST_SHEET.frameH * GHOST_SHEET.accessories}px`,
+} as React.CSSProperties;
 const FACE_COL = { down: 0, up: 1, left: 2, right: 3 } as const;
 
 export function SceneViewport({ layout, selectedId, demo, controlsEnabled, onSelectGhost, onOpenLocation, onOpenCrowd }: SceneViewportProps) {
@@ -43,7 +50,7 @@ export function SceneViewport({ layout, selectedId, demo, controlsEnabled, onSel
     const host = hostRef.current; if (!host) return;
     const measure = () => {
       const w = host.clientWidth || STAGE.w;
-      const h = Math.max(240, (window.innerHeight || STAGE.h) - 150);
+      const h = Math.max(240, (window.innerHeight || STAGE.h) - 170);
       setScale(stageScale(w, h));
     };
     measure();
@@ -63,11 +70,11 @@ export function SceneViewport({ layout, selectedId, demo, controlsEnabled, onSel
       const idle = isIdle(s);
       frameClock = Math.floor((performance.now() / (s.moving ? 160 : 480)) % 2);
       const frame = reduced ? 0 : frameClock;
-      el.style.transform = `translate(${Math.round(s.x) - 14}px, ${Math.round(s.y) - 32}px)`;
+      el.style.transform = `translate(${Math.round(s.x) - LUMI_SHEET.anchorX}px, ${Math.round(s.y) - LUMI_SHEET.anchorY}px)`;
       el.style.zIndex = String(10 + Math.round(s.y));
       el.dataset.facing = s.facing; el.dataset.state = s.moving ? 'walk' : idle ? 'idle' : 'still';
-      el.style.setProperty('--pw-lx', `${-FACE_COL[s.facing] * 28}px`);
-      el.style.setProperty('--pw-ly', `${-frame * 34}px`);
+      el.style.setProperty('--pw-lx', `${-FACE_COL[s.facing] * LUMI_SHEET.frameW}px`);
+      el.style.setProperty('--pw-ly', `${-frame * LUMI_SHEET.frameH}px`);
     };
     const tick = (now: number) => {
       const dt = Math.min(now - last, 50); last = now;
@@ -90,18 +97,18 @@ export function SceneViewport({ layout, selectedId, demo, controlsEnabled, onSel
     <div className="pw-stage-host" ref={hostRef}>
       <div className="pw-stage-frame" style={scaledStyle}>
         <div className="pw-stage" role="application" tabIndex={-1} aria-label="The Lantern Graveyard. Move Lumi with WASD or the arrow keys." data-scale={scale}
-          style={{ transform: `scale(${scale})` }}>
-          <img className="pw-layer" src={assetUrl('bg-sky')} alt="" style={{ top: 0 }} />
-          <img className="pw-layer" src={assetUrl('moon')} alt="" style={{ left: 270, top: 10, width: 96, height: 96 }} />
-          <img className="pw-layer" src={assetUrl('bg-far')} alt="" style={{ top: 0, height: 190 }} />
-          <img className="pw-layer" src={assetUrl('ground')} alt="" style={{ top: 0 }} />
+          style={{ transform: `scale(${scale})`, ...SHEET_VARS }}>
+          <img className={`pw-layer${artClass('bg-sky')}`} src={assetUrl('bg-sky')} alt="" style={{ top: 0, width: STAGE.w, height: STAGE.h }} />
+          <img className={`pw-layer${artClass('moon')}`} src={assetUrl('moon')} alt="" style={{ left: 270, top: 10, width: 96, height: 96 }} />
+          <img className={`pw-layer${artClass('bg-far')}`} src={assetUrl('bg-far')} alt="" style={{ top: 0, width: STAGE.w, height: 190 }} />
+          <img className={`pw-layer${artClass('ground')}`} src={assetUrl('ground')} alt="" style={{ top: 0, width: STAGE.w, height: STAGE.h }} />
 
           {LOCATIONS.map((l) => (
-            <img key={l.id} className="pw-sprite" src={assetUrl(l.asset)} alt="" data-sprite={l.id}
+            <img key={l.id} className={`pw-sprite${artClass(l.asset)}`} src={assetUrl(l.asset)} alt="" data-sprite={l.id}
               style={{ left: l.sprite.x, top: l.sprite.y, width: l.sprite.w, height: l.sprite.h, zIndex: 10 + l.footprint.y + l.footprint.h }} />
           ))}
           {props.map((p) => (
-            <img key={p.id} className="pw-sprite" src={assetUrl(p.asset)} alt="" data-sprite={p.id}
+            <img key={p.id} className={`pw-sprite${artClass(p.asset)}`} src={assetUrl(p.asset)} alt="" data-sprite={p.id}
               style={{ left: p.x, top: p.y, width: p.w, height: p.h, zIndex: 10 + (p.solid ? p.solid.y + p.solid.h : p.y + p.h) }} />
           ))}
           {[[440, 238], [560, 276], [60, 164], [500, 152]].map(([x, y]) => (
@@ -125,11 +132,11 @@ export function SceneViewport({ layout, selectedId, demo, controlsEnabled, onSel
 
           <LumiSprite ref={lumiRef} />
 
-          <img className="pw-layer pw-fg" src={assetUrl('foreground')} alt="" style={{ top: 0, zIndex: 500 }} />
-          <img className="pw-fg" src={assetUrl('wisteria-canopy')} alt="" style={{ left: 0, top: 0, width: 200, zIndex: 501 }} />
-          <img className="pw-fg" src={assetUrl('wisteria-canopy')} alt="" style={{ left: 440, top: 0, width: 200, zIndex: 501, transform: 'scaleX(-1)' }} />
+          <img className={`pw-layer pw-fg${artClass('foreground')}`} src={assetUrl('foreground')} alt="" style={{ top: 0, width: STAGE.w, height: STAGE.h, zIndex: 500 }} />
+          <img className={`pw-fg${artClass('wisteria-canopy')}`} src={assetUrl('wisteria-canopy')} alt="" style={{ left: 0, top: 0, width: 200, height: 90, zIndex: 501 }} />
+          <img className={`pw-fg${artClass('wisteria-canopy')}`} src={assetUrl('wisteria-canopy')} alt="" style={{ left: 440, top: 0, width: 200, height: 90, zIndex: 501, transform: 'scaleX(-1)' }} />
           <div className="pw-vignette" />
-          {near && controlsEnabled && <div className="pw-hint" style={{ zIndex: 600 }}><kbd>E</kbd> {near.label}</div>}
+          {near && controlsEnabled && <div className="pw-hint" style={{ zIndex: 600 }}><kbd>E</kbd> <span>{near.label}</span></div>}
         </div>
       </div>
     </div>

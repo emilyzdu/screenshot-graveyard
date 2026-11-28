@@ -2,6 +2,7 @@ import { memo, useEffect, useState } from 'react';
 import { assetUrl } from '../assets';
 import { hash, ACCESSORIES, type GhostView } from '../model/ghostView';
 import type { Slot } from '../model/slots';
+import { GHOST_SHEET } from '../model/spriteSpec';
 import { Badge } from './Badge';
 
 const WANDER_RADIUS = 12;
@@ -33,7 +34,7 @@ function GhostSpriteImpl({ ghost, slot, selected, reducedMotion, demo, onSelect 
     <button
       type="button" className={`pw-ghost${selected ? ' is-selected' : ''}`} aria-label={label} aria-pressed={selected}
       data-ghost-id={ghost.id} data-accessory={accessory} data-location={ghost.location}
-      style={{ left: slot.x - 16, top: slot.y - 40, zIndex: 10 + slot.y, transform: `translate(${shown.x}px, ${shown.y}px)`, ['--pw-gx' as string]: `${-ghost.tint * 48}px`, ['--pw-gx2' as string]: `${-ghost.tint * 48 - 24}px`, ['--pw-gy' as string]: `${-ghost.accessory * 28}px`, ['--pw-sheet' as string]: `url(${assetUrl('ghost-sheet')})` }}
+      style={{ left: slot.x - 16, top: slot.y - 40, zIndex: 10 + slot.y, transform: `translate(${shown.x}px, ${shown.y}px)`, ['--pw-gx' as string]: `${-ghost.tint * GHOST_SHEET.frameW * GHOST_SHEET.framesPerTint}px`, ['--pw-gx2' as string]: `${-(ghost.tint * GHOST_SHEET.framesPerTint + 1) * GHOST_SHEET.frameW}px`, ['--pw-gy' as string]: `${-ghost.accessory * GHOST_SHEET.frameH}px`, ['--pw-sheet' as string]: `url(${assetUrl('ghost-sheet')})` }}
       onClick={(e) => onSelect(ghost.id, e.currentTarget)}
     >
       <span className="pw-ghost__badge">

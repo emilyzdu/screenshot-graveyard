@@ -6,7 +6,7 @@
 // mockups in docs/design/pixel-world are references only and are never sliced.
 // All output is flagged production_ready: false (placeholder art for review).
 import { deflateSync } from 'node:zlib';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -111,7 +111,12 @@ const BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 const bayer = (x, y) => BAYER[y & 3][x & 3] / 16;
 
 const manifest = [];
+// Assets replaced by reviewed 3x art (keep in sync with HD_ASSETS in src/world/model/spriteSpec.ts).
+// The generator never overwrites them and keeps their existing manifest entry.
+const HD_KEEP = new Set(['building-tower']);
+const prevManifest = existsSync(join(OUT, 'manifest.json')) ? JSON.parse(readFileSync(join(OUT, 'manifest.json'), 'utf8')).assets ?? [] : [];
 function emit(id, file, canvas, meta = {}) {
+  if (HD_KEEP.has(id)) { const keep = prevManifest.find((a) => a.id === id); if (keep) { manifest.push(keep); return; } }
   writeFileSync(join(OUT, file), encodePng(canvas));
   manifest.push({ id, file, width: canvas.w, height: canvas.h, frames: meta.frames ?? 1, ...(meta.frameSize ? { frameSize: meta.frameSize } : {}), role: meta.role ?? 'scene', source: 'procedural (scripts/generate-world-assets.mjs)', license: 'original, generated in this repository', production_ready: false });
 }

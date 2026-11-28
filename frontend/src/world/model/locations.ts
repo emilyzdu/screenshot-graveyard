@@ -27,7 +27,7 @@ const loc = (id: LocationId, label: string, overlay: OverlayId, sprite: Rect, fo
 });
 
 export const LOCATIONS: readonly WorldLocation[] = [
-  loc('tower', 'Clock Tower', 'calendar', { x: 24, y: 40, w: 64, h: 112 }, { x: 30, y: 134, w: 52, h: 18 }),
+  loc('tower', 'Clock Tower', 'calendar', { x: 12, y: 8, w: 88, h: 144 }, { x: 30, y: 134, w: 52, h: 18 }),
   loc('library', 'Library', 'notes', { x: 470, y: 60, w: 112, h: 88 }, { x: 476, y: 132, w: 100, h: 16 }),
   loc('well', 'Upload Well', 'upload', { x: 292, y: 132, w: 56, h: 56 }, { x: 298, y: 172, w: 44, h: 16 }),
   loc('altar', 'Approval Altar', 'altar', { x: 410, y: 196, w: 56, h: 44 }, { x: 416, y: 226, w: 44, h: 14 }),
